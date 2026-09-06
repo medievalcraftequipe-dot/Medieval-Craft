@@ -1,0 +1,86 @@
+name: Publicar Tempest Light
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versao sem v, exemplo: 0.1.32"
+        required: false
+        type: string
+      releaseNotes:
+        description: "Notas da atualizacao"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Gerar instalador e JSONs
+    runs-on: windows-latest
+
+    steps:
+      - name: Baixar codigo
+        uses: actions/checkout@v4
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Ativar pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.17.0 --activate
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Configurar canal de update
+        shell: pwsh
+        run: |
+          node -e "const fs=require('fs'); const p='apps/desktop/electron/config.json'; const c=JSON.parse(fs.readFileSync(p,'utf8')); c.updateFeedUrl='https://github.com/'+process.env.GITHUB_REPOSITORY+'/releases/latest/download/tempest_light_update.json'; fs.writeFileSync(p, JSON.stringify(c,null,2)+'\n');"
+
+      - name: Aplicar versao informada
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
+        shell: pwsh
+        env:
+          TEMPEST_LIGHT_VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:TEMPEST_LIGHT_VERSION.Trim()
+          if ($version.StartsWith("v")) {
+            $version = $version.Substring(1)
+          }
+          $env:TEMPEST_LIGHT_VERSION = $version
+          node -e "const fs=require('fs'); const version=process.env.TEMPEST_LIGHT_VERSION; for (const p of ['package.json','apps/desktop/package.json']) { const pkg=JSON.parse(fs.readFileSync(p,'utf8')); pkg.version=version; fs.writeFileSync(p, JSON.stringify(pkg,null,2)+'\n'); }"
+
+      - name: Gerar instalador e JSONs
+        shell: pwsh
+        env:
+          TEMPEST_LIGHT_GITHUB_REPOSITORY: ${{ github.repository }}
+        run: pnpm --filter "./apps/desktop" build:installer:windows
+
+      - name: Publicar Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEMPEST_LIGHT_RELEASE_NOTES: ${{ inputs.releaseNotes }}
+        run: |
+          $version = node -p "require('./apps/desktop/package.json').version"
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -like "v*") { $env:GITHUB_REF_NAME } else { "v$version" }
+          $notes = if ($env:TEMPEST_LIGHT_RELEASE_NOTES) { $env:TEMPEST_LIGHT_RELEASE_NOTES } else { "Atualizacao automatica do Tempest Light." }
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "Tempest Light $version" --notes $notes --target $env:GITHUB_SHA
+          }
+          gh release upload $tag "INSTALADOR/JSON_PARA_GITHUB/tempest_light_update.json" --clobber
+          gh release upload $tag "INSTALADOR/JSON_PARA_GITHUB/tempest_light_download_info.json" --clobber
+          gh release upload $tag "INSTALADOR/JSON_PARA_GITHUB/tempest_light_installer_package.json" --clobber
+          Get-ChildItem "INSTALADOR/JSON_PARA_GITHUB/tempest_light_installer_package_part*.json" | ForEach-Object {
+            gh release upload $tag $_.FullName --clobber
+          }
