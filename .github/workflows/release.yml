@@ -41,6 +41,10 @@ jobs:
       - name: Instalar dependencias
         run: pnpm install --frozen-lockfile
 
+      - name: Baixar Electron para empacotamento
+        shell: pwsh
+        run: node node_modules/electron/install.js
+
       - name: Configurar canal de update
         shell: pwsh
         run: |
