@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@tempest-light/types": ["packages/types/src/index.ts"],
+      "@tempest-light/shared": ["packages/shared/src/index.ts"],
+      "@tempest-light/api-client": ["packages/api-client/src/index.ts"],
+      "@tempest-light/ui": ["packages/ui/src/index.tsx"]
+    }
+  }
+}

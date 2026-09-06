@@ -1,0 +1,8 @@
+DISPLAY_NAME=Tempest Light API
+DESCRIPTION=Servidor online da API do Tempest Light
+MAIN=index.js
+LANGUAGE=node
+MEMORY=1024
+VERSION=recommended
+SUBDOMAIN=tempest-light-api
+CUSTOM_COMMAND=npm run shard:start

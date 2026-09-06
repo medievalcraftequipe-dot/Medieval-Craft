@@ -1,0 +1,22 @@
+{
+  "name": "@tempest-light/desktop",
+  "version": "0.1.38",
+  "private": true,
+  "description": "Tempest Light desktop launcher and client.",
+  "author": "Tempest Light",
+  "type": "module",
+  "main": "apps/desktop/electron/main.cjs",
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop dev",
+    "build": "pnpm --dir apps/desktop build",
+    "build:windows": "pnpm --dir apps/desktop build:windows",
+    "build:installer:windows": "pnpm --dir apps/desktop build:installer:windows",
+    "pack": "pnpm --dir apps/desktop pack",
+    "package:update-json": "pnpm --dir apps/desktop package:update-json",
+    "package:installer:json": "pnpm --dir apps/desktop package:installer:json"
+  },
+  "devDependencies": {
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3"
+  }
+}

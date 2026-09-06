@@ -1,0 +1,42 @@
+appId: app.tempestlight.desktop
+productName: Tempest Light
+copyright: Copyright Tempest Light
+electronDist: node_modules/electron/dist
+npmRebuild: false
+buildDependenciesFromSource: false
+
+directories:
+  output: release
+
+files:
+  - electron/**/*
+  - dist-web/**/*
+  - build/icon.ico
+  - build/icon.png
+  - package.json
+
+extraMetadata:
+  main: electron/main.cjs
+
+protocols:
+  - name: Tempest Light Invite
+    schemes:
+      - tempest-light
+
+win:
+  icon: build/icon.ico
+  signExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Tempest Light
+  uninstallDisplayName: Tempest Light

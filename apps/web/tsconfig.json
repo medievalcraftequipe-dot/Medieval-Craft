@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "moduleResolution": "Node",
+    "noEmit": true,
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src",
+    "vite.config.ts",
+    "../../packages/api-client/src",
+    "../../packages/types/src",
+    "../../packages/ui/src"
+  ]
+}
