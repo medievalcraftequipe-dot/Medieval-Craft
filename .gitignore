@@ -1,6 +1,9 @@
 node_modules
 dist
 build
+!apps/desktop/build/
+!apps/desktop/build/icon.ico
+!apps/desktop/build/icon.png
 .turbo
 .vite
 .env
@@ -16,6 +19,7 @@ coverage
 backend/api/prisma/dev.db
 apps/desktop/dist-web
 apps/desktop/release
+apps/desktop/release-installer
 apps/desktop/legacy-icons
 INSTALADOR/Tempest Light Setup *.exe
 INSTALADOR/JSON_PARA_GITHUB/*.json

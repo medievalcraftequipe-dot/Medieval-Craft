@@ -4,6 +4,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { BanMemberDto } from "./dto/ban-member.dto";
 import { CreateInviteDto } from "./dto/create-invite.dto";
 import { CreateServerDto } from "./dto/create-server.dto";
+import { DeleteServerDto } from "./dto/delete-server.dto";
 import { JoinServerDto } from "./dto/join-server.dto";
 import { SendServerMessageDto } from "./dto/send-server-message.dto";
 import { TimeoutMemberDto } from "./dto/timeout-member.dto";
@@ -54,8 +55,8 @@ export class ServersController {
   }
 
   @Delete(":serverId")
-  deleteServer(@Param("serverId") serverId: string, @Req() request: AuthenticatedRequest) {
-    return this.servers.deleteServer(request.user.id, serverId);
+  deleteServer(@Param("serverId") serverId: string, @Body() dto: DeleteServerDto, @Req() request: AuthenticatedRequest) {
+    return this.servers.deleteServer(request.user.id, serverId, dto.currentPassword);
   }
 
   @Post(":serverId/invites")

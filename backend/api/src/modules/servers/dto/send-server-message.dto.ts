@@ -8,7 +8,7 @@ export class SendServerMessageDto {
 
   @IsString()
   @MinLength(1)
-  @MaxLength(1_200_000)
+  @MaxLength(70_000_000)
   content!: string;
 
   @IsOptional()

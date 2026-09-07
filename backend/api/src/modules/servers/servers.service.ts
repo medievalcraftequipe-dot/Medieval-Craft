@@ -1,13 +1,14 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { Prisma, User } from "@prisma/client";
+import { verify } from "@node-rs/argon2";
 import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../common/prisma/prisma.service";
 
 type ClientServerState = Record<string, unknown>;
 type InviteDuration = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
 
-const voiceSessionTtlMs = 3 * 60_000;
+const voiceSessionTtlMs = 8 * 60_000;
 const voiceSignalTtlMs = 5 * 60_000;
 const channelNameMaxLength = 100;
 const fallbackDeveloperEmails = ["rafaeltanki1212@gmail.com", "izigamer47@gmail.com"];
@@ -148,10 +149,10 @@ export class ServersService {
     return { server: this.presentServerState(updated) };
   }
 
-  async deleteServer(userId: string, serverId: string) {
+  async deleteServer(userId: string, serverId: string, currentPassword: string) {
     const server = await this.prisma.server.findUnique({
       where: { id: serverId },
-      select: { id: true, ownerId: true }
+      select: { id: true, ownerId: true, owner: { select: { passwordHash: true } } }
     });
 
     if (!server) {
@@ -160,6 +161,11 @@ export class ServersService {
 
     if (server.ownerId !== userId) {
       throw new ForbiddenException("Somente o dono pode excluir este servidor.");
+    }
+
+    const passwordMatches = await verify(server.owner.passwordHash, currentPassword);
+    if (!passwordMatches) {
+      throw new UnauthorizedException("Senha atual incorreta.");
     }
 
     await this.prisma.server.delete({
@@ -798,7 +804,7 @@ export class ServersService {
         avatarUrl: membership.user.avatarUrl,
         bannerUrl: membership.user.bannerUrl,
         bio: membership.user.bio,
-        presence: membership.user.presence,
+        presence: membership.user.presence === "INVISIBLE" ? "OFFLINE" : membership.user.presence,
         accountCreatedAt: membership.user.createdAt.toISOString(),
         joinedAt: membership.joinedAt.toISOString(),
         roleIds: this.readStringArray(existing.roleIds, ["everyone"]),

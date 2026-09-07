@@ -343,9 +343,13 @@ export class SocialService {
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
       customStatus: user.customStatus,
-      presence: user.presence,
+      presence: this.presentPublicPresence(user.presence),
       blockNonFriendDirectMessages: user.blockNonFriendDirectMessages
     };
+  }
+
+  private presentPublicPresence(presence: User["presence"]) {
+    return presence === "INVISIBLE" ? "OFFLINE" : presence;
   }
 
   private presentFriendRequest(

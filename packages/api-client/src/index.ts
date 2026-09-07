@@ -6,6 +6,7 @@ import type {
   ChangePasswordInput,
   DeleteOnlineServerResponse,
   DeleteAccountInput,
+  DeleteServerInput,
   DirectConversation,
   DirectConversationSummary,
   DirectMessage,
@@ -99,7 +100,7 @@ export interface TempestLightApiClient {
   getServer(serverId: string): Promise<OnlineServerResponse>;
   createServer(input: CreateOnlineServerInput): Promise<OnlineServerResponse>;
   updateServerState(serverId: string, input: UpdateOnlineServerStateInput): Promise<OnlineServerResponse>;
-  deleteServer(serverId: string): Promise<DeleteOnlineServerResponse>;
+  deleteServer(serverId: string, input: DeleteServerInput): Promise<DeleteOnlineServerResponse>;
   joinServer(input: JoinServerInput): Promise<OnlineServerResponse>;
   joinPublicServer(serverId: string): Promise<OnlineServerResponse>;
   createServerInvite(serverId: string, input: CreateServerInviteInput): Promise<OnlineServerInviteResponse>;
@@ -289,9 +290,10 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
         method: "PATCH",
         body: JSON.stringify(input)
       }),
-    deleteServer: (serverId) =>
+    deleteServer: (serverId, input) =>
       request<DeleteOnlineServerResponse>(`/servers/${encodeURIComponent(serverId)}`, {
-        method: "DELETE"
+        method: "DELETE",
+        body: JSON.stringify(input)
       }),
     joinServer: (input) =>
       request<OnlineServerResponse>("/servers/join", {

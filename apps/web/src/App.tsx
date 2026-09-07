@@ -76,6 +76,7 @@ import type {
   DirectConversation,
   DirectConversationSummary,
   DirectMessage,
+  DeleteServerInput,
   FriendRequestItem,
   OnlineServerMessage,
   OnlineVoiceSignal,
@@ -157,7 +158,7 @@ type InviteDurationId = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
 type TimeoutDurationId = "2h" | "5h" | "24h" | "2d" | "1w";
 type ChatComposerTarget = "server" | "direct";
 type ServerAccessMode = "invite" | "request" | "discoverable";
-type ScreenShareQualityId = "144p" | "360p" | "720p" | "1080p" | "2k";
+type ScreenShareQualityId = "144p" | "360p" | "720p" | "1080p" | "2k" | "4k" | "8k";
 type ScreenShareCaptureMode = "screen" | "game";
 
 const soundboardMaxSounds = 24;
@@ -187,21 +188,32 @@ const timeoutDurationOptions: Array<{ id: TimeoutDurationId; label: string; minu
   { id: "2d", label: "2 dias", minutes: 2880 },
   { id: "1w", label: "1 semana", minutes: 10080 }
 ];
-const chatAttachmentMaxBytes = 720 * 1024;
+const chatAttachmentMaxBytes = 3 * 1024 * 1024 * 1024;
+const chatInlineAttachmentMaxBytes = 24 * 1024 * 1024;
 const chatImageMaxWidth = 1280;
 const chatImageMaxHeight = 720;
 const profileImageDataUrlMaxBytes = 4 * 1024 * 1024;
 const youtubeHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$/i;
+const trustedMediaHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$|(^|\.)twitch\.tv$/i;
 const dangerousFileExtensionPattern = /\.(?:exe|msi|bat|cmd|ps1|scr|vbs|jar|com|pif|apk|dll|reg|lnk|iso|img|app|dmg)(?:[?#].*)?$/i;
-const archiveFileExtensionPattern = /\.(?:zip|rar|7z|tar|gz|bz2)(?:[?#].*)?$/i;
 const imageFileNamePattern = /\.(?:png|jpe?g|gif|webp|avif)$/i;
 const screenShareQualities: Array<{ id: ScreenShareQualityId; label: string; width: number; height: number }> = [
   { id: "144p", label: "144p", width: 256, height: 144 },
   { id: "360p", label: "360p", width: 640, height: 360 },
   { id: "720p", label: "720p", width: 1280, height: 720 },
   { id: "1080p", label: "1080p", width: 1920, height: 1080 },
-  { id: "2k", label: "2K", width: 2560, height: 1440 }
+  { id: "2k", label: "2K", width: 2560, height: 1440 },
+  { id: "4k", label: "4K", width: 3840, height: 2160 },
+  { id: "8k", label: "8K", width: 7680, height: 4320 }
 ];
+const voiceAudioConstraints: MediaTrackConstraints = {
+  echoCancellation: { ideal: true },
+  noiseSuppression: { ideal: true },
+  autoGainControl: { ideal: true },
+  channelCount: { ideal: 1 },
+  sampleRate: { ideal: 48000 },
+  sampleSize: { ideal: 16 }
+};
 type CreateServerStep = "start" | "purpose" | "personalize" | "discord";
 type EditablePresenceStatus = Exclude<PresenceStatus, "OFFLINE">;
 type ServerSettingsView =
@@ -1200,10 +1212,7 @@ function useVoiceActivity(active: boolean, muted: boolean, providedStream?: Medi
         } else {
           ownsStream = true;
           stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true
-            },
+            audio: voiceAudioConstraints,
             video: false
           });
         }
@@ -1225,7 +1234,8 @@ function useVoiceActivity(active: boolean, muted: boolean, providedStream?: Medi
         audioContext = new AudioContextConstructor();
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 512;
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.35;
         source.connect(analyser);
 
         const samples = new Uint8Array(analyser.fftSize);
@@ -1244,7 +1254,7 @@ function useVoiceActivity(active: boolean, muted: boolean, providedStream?: Medi
           });
 
           const rms = Math.sqrt(total / samples.length);
-          const nextSpeaking = rms > 0.045;
+          const nextSpeaking = rms > 0.022;
           if (nextSpeaking !== lastSpeaking) {
             lastSpeaking = nextSpeaking;
             setSpeaking(nextSpeaking);
@@ -1388,7 +1398,11 @@ function useOnlineVoiceCall({
     }
 
     const peer = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      iceCandidatePoolSize: 10,
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:global.stun.twilio.com:3478" }
+      ]
     });
 
     [localStreamRef.current, screenStreamRef.current].forEach((stream) => {
@@ -1537,11 +1551,7 @@ function useOnlineVoiceCall({
     async function openMicrophone() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          },
+          audio: voiceAudioConstraints,
           video: false
         });
 
@@ -1945,13 +1955,49 @@ function getActiveBoosts(boosts: ServerBoost[], now = Date.now()) {
   return boosts.filter((boost) => Date.parse(boost.expiresAt) > now);
 }
 
-const boostLevelTargets = [2, 5, 10, 18, 28, 40, 55, 72, 92, 115, 140, 170, 205, 245, 290];
+const boostLevelTargets = [
+  2, 5, 10, 18, 28, 40, 55, 72, 92, 115,
+  140, 170, 205, 245, 290, 350, 420, 500, 590, 690,
+  800, 920, 1050, 1190, 1340, 1500, 1670, 1850, 2040, 2250
+];
 const BOOST_MAX_LEVEL = boostLevelTargets.length;
 const SERVER_ICON_UNLOCK_LEVEL = 6;
 const SERVER_BADGE_UNLOCK_LEVEL = 7;
 const SERVER_GUIDE_UNLOCK_LEVEL = 8;
 const SERVER_LEGENDARY_THEME_UNLOCK_LEVEL = 10;
 const SERVER_GUIDE_BANNER_UNLOCK_LEVEL = BOOST_MAX_LEVEL;
+const boostRewardLabels = [
+  "Plano de fundo do convite",
+  "Banner do servidor",
+  "Convite personalizado e banner animado",
+  "Cor de destaque do servidor",
+  "Cartao de boas-vindas",
+  "Foto do servidor",
+  "Selo e paleta da barra",
+  "Guia do servidor",
+  "Mais canais em destaque",
+  "Tema lendario",
+  "Destaque avancado de cargos",
+  "Slots extras de som",
+  "Expressoes extras",
+  "Prioridade visual de comunidade",
+  "Marco de comunidade 15",
+  "Recompensa de comunidade 16",
+  "Recompensa de comunidade 17",
+  "Recompensa de comunidade 18",
+  "Recompensa de comunidade 19",
+  "Recompensa de comunidade 20",
+  "Recompensa de comunidade 21",
+  "Recompensa de comunidade 22",
+  "Recompensa de comunidade 23",
+  "Recompensa de comunidade 24",
+  "Recompensa de comunidade 25",
+  "Recompensa de comunidade 26",
+  "Recompensa de comunidade 27",
+  "Recompensa de comunidade 28",
+  "Recompensa de comunidade 29",
+  "Banner completo da Guia"
+];
 
 function getBoostLevel(boostCount: number) {
   return boostLevelTargets.reduce((level, target, index) => (boostCount >= target ? index + 1 : level), 0);
@@ -1959,6 +2005,10 @@ function getBoostLevel(boostCount: number) {
 
 function getNextBoostTarget(boostCount: number) {
   return boostLevelTargets.find((target) => boostCount < target) ?? boostLevelTargets[boostLevelTargets.length - 1];
+}
+
+function getBoostOverflowCount(boostCount: number) {
+  return Math.max(0, boostCount - boostLevelTargets[boostLevelTargets.length - 1]);
 }
 
 function getServerInviteLink(server: ServerDefinition, code: string) {
@@ -2573,6 +2623,20 @@ function isDataImageSource(value: string | null | undefined) {
   return /^data:image\/(png|jpe?g|gif|webp|avif);base64,/i.test(String(value ?? "").trim());
 }
 
+function isDataAttachmentSource(value: string | null | undefined) {
+  return /^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,/i.test(String(value ?? "").trim());
+}
+
+function isSafeAttachmentSource(value: string | null | undefined) {
+  const source = String(value ?? "").trim();
+  return Boolean(source && (isSafeImageSource(source) || isDataAttachmentSource(source)));
+}
+
+function sanitizeAttachmentSource(value: string | null | undefined) {
+  const source = String(value ?? "").trim();
+  return isSafeAttachmentSource(source) ? source : null;
+}
+
 function getLocalProfileImagesKey(user: Pick<AuthUser, "id">) {
   return `${LOCAL_PROFILE_IMAGES_PREFIX}:${user.id}`;
 }
@@ -2649,6 +2713,23 @@ function getDataUrlByteLength(dataUrl: string) {
   return Math.floor((base64.length * 3) / 4);
 }
 
+function formatBytes(bytes: number) {
+  const safeBytes = Math.max(0, bytes);
+  if (safeBytes < 1024) {
+    return `${safeBytes} B`;
+  }
+
+  const units = ["KB", "MB", "GB"];
+  let value = safeBytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
 function encodeJsonBase64(value: unknown) {
   return btoa(unescape(encodeURIComponent(JSON.stringify(value))));
 }
@@ -2667,18 +2748,19 @@ function normalizeChatAttachment(value: unknown): ChatAttachment | null {
   }
 
   const item = value as Partial<ChatAttachment>;
-  const url = sanitizeImageSource(item.url);
-  const name = typeof item.name === "string" && item.name.trim() ? item.name.trim().slice(0, 120) : "imagem";
-  const mimeType = typeof item.mimeType === "string" && item.mimeType.startsWith("image/") ? item.mimeType : "image/png";
+  const kind: ChatAttachment["kind"] = item.kind === "file" ? "file" : "image";
+  const url = sanitizeAttachmentSource(item.url);
+  const name = typeof item.name === "string" && item.name.trim() ? item.name.trim().slice(0, 120) : kind === "file" ? "arquivo" : "imagem";
+  const mimeType = typeof item.mimeType === "string" && item.mimeType.trim() ? item.mimeType.trim().slice(0, 120) : kind === "file" ? "application/octet-stream" : "image/png";
   const sizeBytes = typeof item.sizeBytes === "number" && Number.isFinite(item.sizeBytes) ? Math.max(0, Math.floor(item.sizeBytes)) : 0;
 
-  if (!url || item.kind !== "image") {
+  if (!url || mimeType.toLowerCase() === "image/svg+xml" || (kind === "image" && (!mimeType.startsWith("image/") || !isSafeImageSource(url)))) {
     return null;
   }
 
   return {
     id: String(item.id || `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
-    kind: "image",
+    kind,
     name,
     mimeType,
     url,
@@ -2801,6 +2883,11 @@ function getYoutubeVideoId(link: string) {
   }
 }
 
+function getYoutubePreviewTitle(link: string) {
+  const videoId = getYoutubeVideoId(link);
+  return videoId ? "Abrir video no YouTube" : "YouTube";
+}
+
 function looksLikeImageLink(link: string) {
   try {
     const url = new URL(link);
@@ -2810,11 +2897,19 @@ function looksLikeImageLink(link: string) {
   }
 }
 
+function isTrustedMediaLink(link: string) {
+  try {
+    return trustedMediaHostPattern.test(new URL(link).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function isPotentiallyDangerousExternalLink(link: string) {
   try {
     const url = new URL(link);
     const path = `${url.pathname}${url.search}`.toLowerCase();
-    return dangerousFileExtensionPattern.test(path) || archiveFileExtensionPattern.test(path);
+    return dangerousFileExtensionPattern.test(path);
   } catch {
     return true;
   }
@@ -2844,18 +2939,42 @@ function getPastedImageFileName(mimeType: string) {
   return "imagem-colada.png";
 }
 
-async function readChatImageAttachment(file: File): Promise<ChatAttachment> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("Escolha uma imagem.");
+function getSafeAttachmentMimeType(file: File) {
+  if (file.type && !/[\r\n;]/.test(file.type)) {
+    return file.type;
   }
 
-  if (file.type === "image/gif" && file.size <= chatAttachmentMaxBytes) {
+  return "application/octet-stream";
+}
+
+async function readChatAttachment(file: File): Promise<ChatAttachment> {
+  if (file.size > chatAttachmentMaxBytes) {
+    throw new Error("Arquivo grande demais. O limite planejado do chat e 3 GB por arquivo.");
+  }
+
+  if (file.size > chatInlineAttachmentMaxBytes) {
+    throw new Error("Arquivo acima de 24 MB precisa do armazenamento dedicado para chegar a outras pessoas sem travar o chat.");
+  }
+
+  if (isImageFile(file) && isGifFile(file)) {
     const url = await readFileAsDataUrl(file);
     return {
       id: `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: "image",
       name: file.name || "imagem.gif",
-      mimeType: file.type,
+      mimeType: getSafeAttachmentMimeType(file),
+      url,
+      sizeBytes: file.size
+    };
+  }
+
+  if (!isImageFile(file)) {
+    const url = await readFileAsDataUrl(file);
+    return {
+      id: `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: "file",
+      name: file.name || "arquivo",
+      mimeType: getSafeAttachmentMimeType(file),
       url,
       sizeBytes: file.size
     };
@@ -2863,7 +2982,7 @@ async function readChatImageAttachment(file: File): Promise<ChatAttachment> {
 
   const url = await resizeChatImageFile(file);
   const sizeBytes = getDataUrlByteLength(url);
-  if (sizeBytes > chatAttachmentMaxBytes) {
+  if (sizeBytes > chatInlineAttachmentMaxBytes) {
     throw new Error("Imagem grande demais para enviar no chat.");
   }
 
@@ -4313,6 +4432,7 @@ function WorkspaceShell({
   const activeServerBoosts = activeServer ? getActiveBoosts(activeServer.boosts, nowTick) : [];
   const activeServerBoostLevel = getBoostLevel(activeServerBoosts.length);
   const activeServerNextBoostTarget = getNextBoostTarget(activeServerBoosts.length);
+  const activeServerBoostOverflow = getBoostOverflowCount(activeServerBoosts.length);
   const activeServerBannerUrl = activeServer ? getServerBannerUrl(activeServer, activeServerBoostLevel) : null;
   const activeVoiceSoundEffects = activeServer?.expressions.soundEffects ?? [];
   const canUseVoiceSoundEffects = Boolean(
@@ -4372,6 +4492,7 @@ function WorkspaceShell({
           (!message.channelName || message.channelName === activeChannel)
       )
     : [];
+  const serverMentionOptions = activeServer ? getMentionAutocompleteOptions(activeServer, draft) : [];
   const activeVoiceChatChannelName = voiceChannel ? getVoiceChatChannelName(voiceChannel) : null;
   const activeVoiceChatMessages =
     activeServer && activeVoiceChatChannelName
@@ -4493,6 +4614,37 @@ function WorkspaceShell({
 
       return changed ? nextServers : currentServers;
     });
+    setMessages((currentMessages) =>
+      currentMessages.map((message) =>
+        messageBelongsToCurrentUser(message, user)
+          ? {
+              ...message,
+              authorId: user.id,
+              authorUsername: user.username,
+              author: user.displayName,
+              authorAvatarUrl: user.avatarUrl
+            }
+          : message
+      )
+    );
+    setDirectMessages((currentDirectMessages) =>
+      Object.fromEntries(
+        Object.entries(currentDirectMessages).map(([conversationId, conversationMessages]) => [
+          conversationId,
+          conversationMessages.map((message) =>
+            messageBelongsToCurrentUser(message, user)
+              ? {
+                  ...message,
+                  authorId: user.id,
+                  authorUsername: user.username,
+                  author: user.displayName,
+                  authorAvatarUrl: user.avatarUrl
+                }
+              : message
+          )
+        ])
+      )
+    );
   }, [user.avatarUrl, user.createdAt, user.displayName, user.id, user.presence, user.username]);
 
   useEffect(() => {
@@ -4852,7 +5004,7 @@ function WorkspaceShell({
     }
 
     void sendVoiceHeartbeat();
-    const interval = window.setInterval(() => void sendVoiceHeartbeat(), 8000);
+    const interval = window.setInterval(() => void sendVoiceHeartbeat(), 5000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -4894,7 +5046,7 @@ function WorkspaceShell({
         }
 
         const member = server.members.find((item) => item.id === user.id || item.username === user.username) ?? null;
-        const canSyncServer = server.ownerId === user.id || memberHasPermission(server, member, "manage_server", user.id);
+        const canSyncServer = isDeveloperUser(user) || server.ownerId === user.id || memberHasPermission(server, member, "manage_server", user.id);
         if (!canSyncServer) {
           return;
         }
@@ -4933,7 +5085,7 @@ function WorkspaceShell({
   }
 
   function openServerSettings(view: ServerSettingsView = "profile") {
-    if (!canAdministerActiveServer) {
+    if (!canAdministerActiveServer && view !== "boosts") {
       setServerNotice("Somente o dono ou administradores podem abrir as configuracoes do servidor.");
       setServerMenuOpen(false);
       return;
@@ -5021,10 +5173,15 @@ function WorkspaceShell({
   }
 
   function replaceMessagesForChannel(serverId: string, channelName: string, nextMessages: LocalMessage[]) {
-    setMessages((current) => [
-      ...current.filter((message) => message.serverId !== serverId || message.channelName !== channelName),
-      ...nextMessages
-    ]);
+    setMessages((current) => {
+      const localBotMessages = current.filter(
+        (message) => message.serverId === serverId && message.channelName === channelName && message.authorIsBot && !message.id
+      );
+      return [
+        ...current.filter((message) => message.serverId !== serverId || message.channelName !== channelName),
+        ...appendUniqueLocalMessages(nextMessages, localBotMessages)
+      ];
+    });
   }
 
   function replaceVoiceStatesForServer(serverId: string, nextStates: OnlineVoiceState[]) {
@@ -5290,15 +5447,15 @@ function WorkspaceShell({
       return;
     }
 
-    const imageFiles = files.filter((file) => file.type.startsWith("image/") && file.type !== "image/svg+xml").slice(0, 4);
-    if (!imageFiles.length) {
-      const notice = "Por enquanto o chat aceita imagens como anexo.";
+    const attachableFiles = files.filter((file) => file.type !== "image/svg+xml").slice(0, 4);
+    if (!attachableFiles.length) {
+      const notice = "Escolha um arquivo valido para enviar.";
       target === "server" ? setServerNotice(notice) : setDirectNotice(notice);
       return;
     }
 
     try {
-      const attachments = await Promise.all(imageFiles.map((file) => readChatImageAttachment(file)));
+      const attachments = await Promise.all(attachableFiles.map((file) => readChatAttachment(file)));
       if (target === "server") {
         setDraftAttachments((current) => [...current, ...attachments].slice(0, 4));
         setServerNotice(null);
@@ -5307,7 +5464,7 @@ function WorkspaceShell({
         setDirectNotice(null);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Nao consegui carregar essa imagem.";
+      const message = error instanceof Error ? error.message : "Nao consegui carregar esse arquivo.";
       target === "server" ? setServerNotice(message) : setDirectNotice(message);
     }
   }
@@ -5336,7 +5493,7 @@ function WorkspaceShell({
 
   function handleChatPaste(event: ClipboardEvent<HTMLInputElement>, target: ChatComposerTarget) {
     const files = Array.from(event.clipboardData.files);
-    if (!files.some((file) => file.type.startsWith("image/"))) {
+    if (!files.length) {
       return;
     }
 
@@ -5401,7 +5558,17 @@ function WorkspaceShell({
   }
 
   function requestOpenExternalLink(link: string) {
+    if (isSafeAttachmentSource(link) && !isSafeHttpUrl(link)) {
+      window.open(link, "_blank", "noopener,noreferrer");
+      return;
+    }
+
     if (!isSafeHttpUrl(link)) {
+      return;
+    }
+
+    if (isTrustedMediaLink(link)) {
+      window.open(link, "_blank", "noopener,noreferrer");
       return;
     }
 
@@ -5448,7 +5615,7 @@ function WorkspaceShell({
     }
 
     if (attachments.length && !canAttachFiles) {
-      setServerNotice("Seu cargo nao permite anexar imagens neste servidor.");
+      setServerNotice("Seu cargo nao permite anexar arquivos neste servidor.");
       return;
     }
 
@@ -6142,7 +6309,7 @@ function WorkspaceShell({
     return true;
   }
 
-  async function deleteActiveServer() {
+  async function deleteActiveServer(input: DeleteServerInput) {
     if (!activeServer) {
       return false;
     }
@@ -6153,13 +6320,15 @@ function WorkspaceShell({
 
     const serverId = activeServer.id;
     const serverName = activeServer.name;
-    if (onlineMode && api) {
-      try {
-        await api.deleteServer(serverId);
-      } catch (caught) {
-        setOnlineSyncStatus("error");
-        throw caught;
-      }
+    if (!onlineMode || !api) {
+      throw new Error("Conecte a API online para excluir servidor com verificacao de senha.");
+    }
+
+    try {
+      await api.deleteServer(serverId, input);
+    } catch (caught) {
+      setOnlineSyncStatus("error");
+      throw caught;
     }
 
     removeServerFromWorkspace(serverId, `Servidor ${serverName} excluido permanentemente.`);
@@ -6348,7 +6517,7 @@ function WorkspaceShell({
       bannerUrl: contact.bannerUrl,
       bio: contact.bio,
       customStatus: contact.customStatus,
-      presence: contact.status,
+      presence: getPublicPresence(contact.status),
       accountCreatedAt: contact.createdAt ?? null,
       serverJoinedAt: null,
       isOwnProfile: false,
@@ -6386,12 +6555,46 @@ function WorkspaceShell({
       avatarUrl: member.avatarUrl,
       bannerUrl: member.bannerUrl ?? null,
       bio: member.bio ?? null,
-      presence: member.presence,
+      presence: getPublicPresence(member.presence),
       accountCreatedAt: member.accountCreatedAt ?? member.joinedAt,
       serverJoinedAt: member.joinedAt,
       isOwnProfile: false,
       mutualFriends: 0,
       mutualServers: activeServer ? 1 : 0
+    };
+  }
+
+  function getMessageAuthorProfile(message: LocalMessage, directContact?: DirectContact | null) {
+    if (messageBelongsToCurrentUser(message, user)) {
+      return {
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl
+      };
+    }
+
+    const serverMember = activeServer?.members.find(
+      (member) => member.id === message.authorId || member.username === message.authorUsername || member.displayName === message.author
+    );
+    if (serverMember) {
+      return {
+        displayName: serverMember.displayName,
+        avatarUrl: serverMember.avatarUrl
+      };
+    }
+
+    const contact = directContact ?? directContacts.find(
+      (item) => item.id === message.authorId || item.username === message.authorUsername || item.displayName === message.author
+    );
+    if (contact) {
+      return {
+        displayName: contact.displayName,
+        avatarUrl: contact.avatarUrl
+      };
+    }
+
+    return {
+      displayName: message.author,
+      avatarUrl: message.authorAvatarUrl ?? null
     };
   }
 
@@ -6969,7 +7172,7 @@ function WorkspaceShell({
                       <span>@{contact.username}</span>
                     </div>
                     {hasUnreadDirect ? <span className="unread-dot" aria-label="Mensagens nao lidas" /> : null}
-                    <span className={`presence ${contact.status.toLowerCase()}`} />
+                    <span className={`presence ${getPublicPresence(contact.status).toLowerCase()}`} />
                     </button>
                   );
                 })}
@@ -7119,12 +7322,13 @@ function WorkspaceShell({
                   <div>
                     <strong>Objetivo de estrelas</strong>
                     <span>
-                      {Math.min(activeServerBoosts.length, activeServerNextBoostTarget)}/{activeServerNextBoostTarget} Estrelas
+                      {activeServerBoosts.length}/{activeServerNextBoostTarget} Estrelas
+                      {activeServerBoostOverflow ? ` (+${activeServerBoostOverflow})` : ""}
                       <ChevronRight size={13} />
                     </span>
                   </div>
                   <progress
-                    value={activeServerBoostLevel >= BOOST_MAX_LEVEL ? activeServerNextBoostTarget : activeServerBoosts.length}
+                    value={Math.min(activeServerBoosts.length, activeServerNextBoostTarget)}
                     max={Math.max(activeServerNextBoostTarget, 1)}
                   />
                 </section>
@@ -7154,12 +7358,10 @@ function WorkspaceShell({
                     <span>Membros</span>
                   </button>
                 ) : null}
-                {canAdministerActiveServer ? (
-                  <button type="button" onClick={() => openServerSettings("boosts")}>
-                    <Shield size={18} />
-                    <span>Estrelas de servidor</span>
-                  </button>
-                ) : null}
+                <button type="button" onClick={() => openServerSettings("boosts")}>
+                  <Shield size={18} />
+                  <span>Estrelas de servidor</span>
+                </button>
               </section>
               {specialChannels.length ? (
                 <section className="channel-group special-channel-group">
@@ -7697,21 +7899,24 @@ function WorkspaceShell({
 
             <div className="message-list">
               {activeDirect ? (
-                activeDirectMessages.map((message, index) => (
-                  <article className="message" key={`${activeDirect.id}-${message.author}-${message.time}-${index}`}>
-                    <AvatarBadge user={{ displayName: message.author, avatarUrl: message.authorAvatarUrl ?? null }} className="message-avatar" />
-                    <div>
-                      <header>
-                        <strong>
-                          {message.author}
-                          {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
-                        </strong>
-                        <time>{message.time}</time>
-                      </header>
-                      <ChatMessageBody message={message} renderText={renderDirectMessageText} onOpenExternalLink={requestOpenExternalLink} />
-                    </div>
-                  </article>
-                ))
+                activeDirectMessages.map((message, index) => {
+                  const authorProfile = getMessageAuthorProfile(message, activeDirect);
+                  return (
+                    <article className="message" key={`${activeDirect.id}-${message.author}-${message.time}-${index}`}>
+                      <AvatarBadge user={authorProfile} className="message-avatar" />
+                      <div>
+                        <header>
+                          <strong>
+                            {authorProfile.displayName}
+                            {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
+                          </strong>
+                          <time>{message.time}</time>
+                        </header>
+                        <ChatMessageBody message={message} renderText={renderDirectMessageText} onOpenExternalLink={requestOpenExternalLink} />
+                      </div>
+                    </article>
+                  );
+                })
               ) : (
                 <div className="empty-state">
                   <MessageCircle size={34} />
@@ -7732,14 +7937,13 @@ function WorkspaceShell({
               <input
                 ref={directFileInputRef}
                 type="file"
-                accept="image/*"
                 multiple
                 hidden
                 onChange={(event) => handleChatFileChange(event, "direct")}
               />
               <button
                 className="icon-button"
-                title="Anexar imagem"
+                title="Anexar arquivo"
                 type="button"
                 disabled={!activeDirect || !canMessageActiveDirect}
                 onClick={() => directFileInputRef.current?.click()}
@@ -7853,24 +8057,27 @@ function WorkspaceShell({
                   </div>
                 </section>
               ) : null}
-              {activeServerMessages.map((message, index) => (
-                <article
-                  className={["message", messageMentionsUser(message, user) ? "mentioned" : ""].filter(Boolean).join(" ")}
-                  key={`${activeServer.id}-${message.author}-${message.time}-${index}`}
-                >
-                  <AvatarBadge user={{ displayName: message.author, avatarUrl: message.authorAvatarUrl ?? null }} className="message-avatar" />
-                  <div>
-                    <header>
-                      <strong>
-                        {message.author}
-                        {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
-                      </strong>
-                        <time>{message.time}</time>
-                      </header>
-                    <ChatMessageBody message={message} renderText={(text) => renderServerMessageText(message, text)} onOpenExternalLink={requestOpenExternalLink} />
-                  </div>
-                </article>
-              ))}
+              {activeServerMessages.map((message, index) => {
+                const authorProfile = getMessageAuthorProfile(message);
+                return (
+                  <article
+                    className={["message", messageMentionsUser(message, user) ? "mentioned" : ""].filter(Boolean).join(" ")}
+                    key={`${activeServer.id}-${message.author}-${message.time}-${index}`}
+                  >
+                    <AvatarBadge user={authorProfile} className="message-avatar" />
+                    <div>
+                      <header>
+                        <strong>
+                          {authorProfile.displayName}
+                          {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
+                        </strong>
+                          <time>{message.time}</time>
+                        </header>
+                      <ChatMessageBody message={message} renderText={(text) => renderServerMessageText(message, text)} onOpenExternalLink={requestOpenExternalLink} />
+                    </div>
+                  </article>
+                );
+              })}
             </div>
 
             <DraftAttachmentTray attachments={draftAttachments} onRemove={(id) => removeDraftAttachment(id, "server")} />
@@ -7878,37 +8085,57 @@ function WorkspaceShell({
               <input
                 ref={serverFileInputRef}
                 type="file"
-                accept="image/*"
                 multiple
                 hidden
                 onChange={(event) => handleChatFileChange(event, "server")}
               />
               <button
                 className="icon-button"
-                title={canAttachFiles ? "Anexar imagem" : "Seu cargo nao permite anexar arquivos"}
+                title={canAttachFiles ? "Anexar arquivo" : "Seu cargo nao permite anexar arquivos"}
                 type="button"
                 disabled={!canAttachFiles}
                 onClick={() => serverFileInputRef.current?.click()}
               >
                 <Paperclip size={18} />
               </button>
-              <input
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                onPaste={(event) => handleChatPaste(event, "server")}
-                onContextMenu={(event) => handleComposerContextMenu(event, "server")}
-                onKeyDown={preventEnterSubmit}
-                disabled={channelIsPrivate || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)}
-                placeholder={
-                  channelIsPrivate
-                    ? "Canal privado"
-                    : activeMemberTimeoutNotice
-                    ? activeMemberTimeoutNotice
-                    : !canSendServerMessages
-                    ? "Seu cargo nao permite enviar mensagens"
-                    : `Conversar em #${activeChannel}`
-                }
-              />
+              <div className="composer-input-wrap">
+                <input
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onPaste={(event) => handleChatPaste(event, "server")}
+                  onContextMenu={(event) => handleComposerContextMenu(event, "server")}
+                  onKeyDown={preventEnterSubmit}
+                  disabled={channelIsPrivate || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)}
+                  placeholder={
+                    channelIsPrivate
+                      ? "Canal privado"
+                      : activeMemberTimeoutNotice
+                      ? activeMemberTimeoutNotice
+                      : !canSendServerMessages
+                      ? "Seu cargo nao permite enviar mensagens"
+                      : `Conversar em #${activeChannel}`
+                  }
+                />
+                {serverMentionOptions.length ? (
+                  <div className="mention-autocomplete" role="listbox" aria-label="Sugestoes de mencao">
+                    {serverMentionOptions.map((member) => (
+                      <button
+                        key={`mention-option-${member.id}`}
+                        type="button"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => setDraft((current) => replaceActiveMention(current, member.username))}
+                      >
+                        <AvatarBadge user={member} className="mention-autocomplete-avatar" />
+                        <span>
+                          <strong>{member.displayName}</strong>
+                          <small>@{member.username}</small>
+                        </span>
+                        {member.isBot ? <span className="bot-badge">APP</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
               <button
                 className="send-button"
                 title="Enviar mensagem"
@@ -8041,11 +8268,12 @@ function WorkspaceShell({
                     {group.label}
                   </h2>
                   {group.members.map((member) => {
+                    const memberPresence = getPublicPresence(member.presence);
                     return (
                       <button className="member-row rich-member-row" key={member.id} type="button" onClick={() => setProfileCardUser(getMemberProfileCard(member))}>
                         <span className="member-avatar-wrap">
                           <AvatarBadge user={member} className="member-avatar" />
-                          <span className={`member-presence presence ${member.presence.toLowerCase()}`} />
+                          <span className={`member-presence presence ${memberPresence.toLowerCase()}`} />
                         </span>
                         <div>
                           <strong className="member-name-line" style={group.color ? { color: group.color } : undefined}>
@@ -8226,7 +8454,7 @@ function WorkspaceShell({
           onClear={clearMentionNotifications}
         />
       ) : null}
-      {serverSettingsOpen && activeServer && canAdministerActiveServer ? (
+      {serverSettingsOpen && activeServer && (canAdministerActiveServer || serverSettingsInitialView === "boosts") ? (
         <ServerSettingsDialog
           server={activeServer}
           currentUser={user}
@@ -8328,10 +8556,14 @@ function ExternalLinkPreview({ link, onOpen }: { link: string; onOpen: (link: st
   if (youtubeVideoId) {
     return (
       <button className={["message-link-preview", "youtube", risky ? "risky" : ""].filter(Boolean).join(" ")} type="button" onClick={() => onOpen(link)}>
-        <SafePreviewImage src={`https://img.youtube.com/vi/${encodeURIComponent(youtubeVideoId)}/hqdefault.jpg`} alt="" />
-        <span>
-          <strong>YouTube</strong>
-          <small>{link}</small>
+        <span className="youtube-provider">YouTube</span>
+        <strong>{getYoutubePreviewTitle(link)}</strong>
+        <small>{link}</small>
+        <span className="youtube-thumbnail">
+          <SafePreviewImage src={`https://img.youtube.com/vi/${encodeURIComponent(youtubeVideoId)}/hqdefault.jpg`} alt="" />
+          <span className="youtube-play">
+            <Play size={22} />
+          </span>
         </span>
       </button>
     );
@@ -8377,12 +8609,22 @@ function ChatMessageBody({
       {parsed.text ? <p>{renderText(parsed.text)}</p> : null}
       {parsed.attachments.length ? (
         <div className="message-attachments">
-          {parsed.attachments.map((attachment) => (
-            <button className="message-image-attachment" type="button" onClick={() => onOpenExternalLink(attachment.url)} key={attachment.id}>
-              <SafePreviewImage src={attachment.url} alt={attachment.name} />
-              <span>{attachment.name}</span>
-            </button>
-          ))}
+          {parsed.attachments.map((attachment) =>
+            attachment.kind === "image" ? (
+              <button className="message-image-attachment" type="button" onClick={() => onOpenExternalLink(attachment.url)} key={attachment.id}>
+                <SafePreviewImage src={attachment.url} alt={attachment.name} />
+              </button>
+            ) : (
+              <a className="message-file-attachment" href={attachment.url} download={attachment.name} key={attachment.id}>
+                <Paperclip size={18} />
+                <span>
+                  <strong>{attachment.name}</strong>
+                  <small>{formatBytes(attachment.sizeBytes)}</small>
+                </span>
+                <Download size={17} />
+              </a>
+            )
+          )}
         </div>
       ) : null}
       {externalLinks.length ? (
@@ -8451,7 +8693,7 @@ function DraftAttachmentTray({
     <div className="draft-attachments">
       {attachments.map((attachment) => (
         <div className="draft-attachment" key={attachment.id}>
-          <SafePreviewImage src={attachment.url} alt={attachment.name} />
+          {attachment.kind === "image" ? <SafePreviewImage src={attachment.url} alt={attachment.name} /> : <span className="draft-file-icon"><Paperclip size={17} /></span>}
           <span>{attachment.name}</span>
           <button className="mini-action danger-mini-action" type="button" title="Remover anexo" onClick={() => onRemove(attachment.id)}>
             <X size={13} />
@@ -9228,12 +9470,41 @@ function getBotCommandFromText(bot: ServerBotIntegration, text: string) {
   return null;
 }
 
+function getActiveMentionQuery(text: string) {
+  const match = text.match(/(^|\s)@([\p{L}\p{N}_.-]{1,64})$/u);
+  return match ? match[2].toLowerCase() : null;
+}
+
+function getMentionAutocompleteOptions(server: ServerDefinition, text: string) {
+  const query = getActiveMentionQuery(text);
+  if (!query) {
+    return [];
+  }
+
+  return server.members
+    .filter((member) => {
+      const username = member.username.toLowerCase();
+      const displayName = member.displayName.toLowerCase();
+      return username.startsWith(query) || displayName.startsWith(query) || username.includes(query) || displayName.includes(query);
+    })
+    .sort((first, second) => compareServerMembersByPresence(first, second))
+    .slice(0, 8);
+}
+
+function replaceActiveMention(text: string, username: string) {
+  return text.replace(/(^|\s)@[\p{L}\p{N}_.-]{1,64}$/u, (_match, prefix: string) => `${prefix}@${username} `);
+}
+
 function botAllowsChannel(bot: ServerBotIntegration, channelName: string) {
   return !bot.commandChannelNames.length || bot.commandChannelNames.includes(channelName);
 }
 
-function isBotRuntimeOnline(bot: ServerBotIntegration) {
-  return bot.runtimeEnabled && bot.bridgeStatus === "connected";
+function isBotRuntimeOnline(_bot: ServerBotIntegration) {
+  return false;
+}
+
+function botCanRespondInTempest(bot: ServerBotIntegration) {
+  return bot.runtimeEnabled;
 }
 
 function botHasModule(bot: ServerBotIntegration, module: BotCommandModule) {
@@ -9298,7 +9569,7 @@ function getTempestBotResponses(server: ServerDefinition, channelName: string, t
   }
 
   return server.bots
-    .filter((bot) => isBotRuntimeOnline(bot) && botAllowsChannel(bot, channelName))
+    .filter((bot) => botCanRespondInTempest(bot) && botAllowsChannel(bot, channelName))
     .flatMap((bot) => {
       const command = getBotCommandFromText(bot, normalizedText);
       if (!command) {
@@ -9343,6 +9614,20 @@ function reorderItems<T>(items: T[], fromIndex: number, toIndex: number) {
   return nextItems;
 }
 
+function compareServerMembersByPresence(first: ServerMemberDefinition, second: ServerMemberDefinition) {
+  const firstOffline = getPublicPresence(first.presence) === "OFFLINE";
+  const secondOffline = getPublicPresence(second.presence) === "OFFLINE";
+  if (firstOffline !== secondOffline) {
+    return firstOffline ? 1 : -1;
+  }
+
+  return first.displayName.localeCompare(second.displayName, "pt-BR", { sensitivity: "base" });
+}
+
+function sortServerMembersForList(members: ServerMemberDefinition[]) {
+  return [...members].sort(compareServerMembersByPresence);
+}
+
 function getServerMemberGroups(server: ServerDefinition) {
   const assignedMemberIds = new Set<string>();
   const groups: Array<{ id: string; label: string; color: string | null; members: ServerMemberDefinition[] }> = [];
@@ -9350,7 +9635,7 @@ function getServerMemberGroups(server: ServerDefinition) {
   server.roles
     .filter((role) => role.separateMembers && !role.isDefault)
     .forEach((role) => {
-      const members = server.members.filter((member) => member.roleIds.includes(role.id) && !assignedMemberIds.has(member.id));
+      const members = sortServerMembersForList(server.members.filter((member) => member.roleIds.includes(role.id) && !assignedMemberIds.has(member.id)));
       if (!members.length) {
         return;
       }
@@ -9364,13 +9649,13 @@ function getServerMemberGroups(server: ServerDefinition) {
       });
     });
 
-  const remainingMembers = server.members.filter((member) => !assignedMemberIds.has(member.id));
+  const remainingMembers = sortServerMembersForList(server.members.filter((member) => !assignedMemberIds.has(member.id)));
   if (remainingMembers.length || groups.length === 0) {
     groups.push({
       id: "available",
       label: `Disponivel - ${remainingMembers.length || server.members.length}`,
       color: null,
-      members: remainingMembers.length ? remainingMembers : server.members
+      members: remainingMembers.length ? remainingMembers : sortServerMembersForList(server.members)
     });
   }
 
@@ -9463,12 +9748,16 @@ function getPresenceLabel(status: PresenceStatus) {
   const labels: Record<PresenceStatus, string> = {
     ONLINE: "Online",
     IDLE: "Ausente",
-    DND: "Privado",
+    DND: "Nao perturbar",
     INVISIBLE: "Invisivel",
     OFFLINE: "Offline"
   };
 
   return labels[status];
+}
+
+function getPublicPresence(status: PresenceStatus) {
+  return status === "INVISIBLE" ? "OFFLINE" : status;
 }
 
 function formatPublicDate(value?: string | null) {
@@ -10293,7 +10582,7 @@ function ProfileDialog({
               [
                 ["ONLINE", "Online"],
                 ["IDLE", "Ausente"],
-                ["DND", "Privado"],
+                ["DND", "Nao perturbar"],
                 ["INVISIBLE", "Invisivel"]
               ] as Array<[EditablePresenceStatus, string]>
             ).map(([value, label]) => (
@@ -10670,7 +10959,7 @@ function ServerSettingsDialog({
   onUnbanMember?: (userId: string) => Promise<boolean>;
   onTimeoutMember?: (username: string, durationMinutes: TimeoutServerMemberInput["durationMinutes"], reason: string | null) => Promise<boolean>;
   onRemoveTimeout?: (userId: string) => Promise<boolean>;
-  onDeleteServer?: () => Promise<boolean>;
+  onDeleteServer?: (input: DeleteServerInput) => Promise<boolean>;
   onOpenInviteLink?: (inviteLink: string) => void;
   onPublishUpdate?: (input: PublishDesktopUpdateInput) => Promise<PublishDesktopUpdateResponse>;
 }) {
@@ -10740,6 +11029,8 @@ function ServerSettingsDialog({
   const [publishingUpdate, setPublishingUpdate] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [deleteServerConfirmOpen, setDeleteServerConfirmOpen] = useState(false);
+  const [deleteServerConfirmStep, setDeleteServerConfirmStep] = useState<1 | 2>(1);
+  const [deleteServerPassword, setDeleteServerPassword] = useState("");
   const [deleteServerSaving, setDeleteServerSaving] = useState(false);
 
   const selectedRole = server.roles.find((role) => role.id === selectedRoleId) ?? server.roles[0];
@@ -10753,6 +11044,8 @@ function ServerSettingsDialog({
   const canAdministerServerSettings =
     server.ownerId === currentUser.id || developerUser || memberHasPermission(server, currentMember, "administrator", currentUser.id);
   const canManageServerSettings = memberHasPermission(server, currentMember, "manage_server", currentUser.id);
+  const canViewServerSettings = canAdministerServerSettings || initialView === "boosts";
+  const canConfigureBoostPerks = canManageServerSettings || developerUser;
   const canManageInvites = memberHasPermission(server, currentMember, "create_invite", currentUser.id);
   const canBanMembers = developerUser || memberHasPermission(server, currentMember, "ban_members", currentUser.id);
   const canModerateMembers = developerUser || memberHasPermission(server, currentMember, "moderate_members", currentUser.id);
@@ -10807,7 +11100,7 @@ function ServerSettingsDialog({
     setView(initialView);
   }, [initialView, server.id]);
 
-  if (!canAdministerServerSettings) {
+  if (!canViewServerSettings) {
     return (
       <div className="modal-backdrop settings-backdrop" role="presentation">
         <section className="modal-panel compact" aria-label="Sem acesso as configuracoes do servidor">
@@ -10993,6 +11286,12 @@ function ServerSettingsDialog({
     );
   }
 
+  function closeDeleteServerConfirm() {
+    setDeleteServerConfirmOpen(false);
+    setDeleteServerConfirmStep(1);
+    setDeleteServerPassword("");
+  }
+
   async function confirmDeleteServer() {
     if (!canDeleteServer) {
       setSettingsNotice("Somente o dono pode excluir este servidor.");
@@ -11004,10 +11303,15 @@ function ServerSettingsDialog({
       return;
     }
 
+    if (deleteServerPassword.length < 10) {
+      setSettingsNotice("Digite a senha atual da sua conta para confirmar a exclusao.");
+      return;
+    }
+
     setDeleteServerSaving(true);
     setSettingsNotice(null);
     try {
-      const deleted = await onDeleteServer();
+      const deleted = await onDeleteServer({ currentPassword: deleteServerPassword });
       if (!deleted) {
         setDeleteServerSaving(false);
         setSettingsNotice("Nao foi possivel excluir este servidor agora.");
@@ -12687,7 +12991,16 @@ function ServerSettingsDialog({
             <strong>Excluir servidor</strong>
             <p>Apaga este servidor, canais, convites, mensagens salvas, chamadas e configuracoes. Essa acao e permanente.</p>
           </div>
-          <Button variant="danger" type="button" disabled={!canDeleteServer || deleteServerSaving} onClick={() => setDeleteServerConfirmOpen(true)}>
+          <Button
+            variant="danger"
+            type="button"
+            disabled={!canDeleteServer || deleteServerSaving}
+            onClick={() => {
+              setDeleteServerConfirmOpen(true);
+              setDeleteServerConfirmStep(1);
+              setDeleteServerPassword("");
+            }}
+          >
             <Trash2 size={17} />
             Excluir servidor
           </Button>
@@ -12696,16 +13009,39 @@ function ServerSettingsDialog({
         {deleteServerConfirmOpen ? (
           <div className="server-delete-confirm" role="alertdialog" aria-label="Confirmar exclusao do servidor">
             <div>
-              <strong>Tem certeza que deseja excluir o servidor?</strong>
-              <p>Isso nao podera ser revertido. A exclusao e permanente e remove o servidor automaticamente para todos.</p>
+              <strong>{deleteServerConfirmStep === 1 ? "Tem certeza que deseja excluir o servidor?" : "Confirme com a senha da conta"}</strong>
+              <p>
+                {deleteServerConfirmStep === 1
+                  ? "Isso nao podera ser revertido. A exclusao e permanente e remove o servidor automaticamente para todos."
+                  : `Digite sua senha atual para excluir ${server.name} permanentemente.`}
+              </p>
             </div>
+            {deleteServerConfirmStep === 2 ? (
+              <label>
+                Senha atual
+                <input
+                  value={deleteServerPassword}
+                  onChange={(event) => setDeleteServerPassword(event.target.value)}
+                  type="password"
+                  autoComplete="current-password"
+                  minLength={10}
+                  maxLength={128}
+                />
+              </label>
+            ) : null}
             <div className="security-actions">
-              <Button variant="secondary" type="button" disabled={deleteServerSaving} onClick={() => setDeleteServerConfirmOpen(false)}>
+              <Button variant="secondary" type="button" disabled={deleteServerSaving} onClick={closeDeleteServerConfirm}>
                 Cancelar
               </Button>
-              <Button variant="danger" type="button" disabled={deleteServerSaving} onClick={() => void confirmDeleteServer()}>
-                {deleteServerSaving ? "Excluindo..." : "Sim, excluir"}
-              </Button>
+              {deleteServerConfirmStep === 1 ? (
+                <Button variant="danger" type="button" disabled={deleteServerSaving} onClick={() => setDeleteServerConfirmStep(2)}>
+                  Sim, continuar
+                </Button>
+              ) : (
+                <Button variant="danger" type="button" disabled={deleteServerSaving || deleteServerPassword.length < 10} onClick={() => void confirmDeleteServer()}>
+                  {deleteServerSaving ? "Excluindo..." : "Excluir permanentemente"}
+                </Button>
+              )}
             </div>
           </div>
         ) : null}
@@ -12952,11 +13288,12 @@ function ServerSettingsDialog({
           <input value={memberQuery} onChange={(event) => setMemberQuery(event.target.value)} placeholder="Nome ou nick" />
         </label>
         <div className="member-table">
-          {filteredMembers.map((member) => {
+          {sortServerMembersForList(filteredMembers).map((member) => {
             const roles = server.roles.filter((role) => member.roleIds.includes(role.id)).map((role) => role.name);
+            const memberPresence = getPublicPresence(member.presence);
             return (
               <div className="member-table-row" key={member.id}>
-                <span className={`presence ${member.presence.toLowerCase()}`} />
+                <span className={`presence ${memberPresence.toLowerCase()}`} />
                 <strong>{member.displayName}</strong>
                 <span>@{member.username}</span>
                 <span>{new Date(member.joinedAt).toLocaleDateString("pt-BR")}</span>
@@ -13234,6 +13571,7 @@ function ServerSettingsDialog({
       boostLevel >= SERVER_GUIDE_BANNER_UNLOCK_LEVEL
         ? serverGuideBannerDraft.trim() || server.boostPerks.serverGuideBannerUrl
         : "";
+    const boostOverflow = getBoostOverflowCount(activeBoosts.length);
 
     return (
       <section className="settings-main-column">
@@ -13245,14 +13583,22 @@ function ServerSettingsDialog({
           </div>
           <div>
             <strong>NV. {boostLevel}</strong>
-            <span>{boostLevel >= BOOST_MAX_LEVEL ? "nivel maximo" : `${activeBoosts.length}/${nextBoostTarget} para o proximo nivel`}</span>
+            <span>
+              {boostLevel >= BOOST_MAX_LEVEL
+                ? boostOverflow
+                  ? `+${boostOverflow} acima do nivel maximo`
+                  : "nivel maximo"
+                : `${activeBoosts.length}/${nextBoostTarget} para o proximo nivel`}
+            </span>
           </div>
           <div>
             <strong>30 dias</strong>
             <span>validade por estrela</span>
           </div>
         </div>
-        {developerUser ? (
+        {!canConfigureBoostPerks ? (
+          <p className="settings-notice">Visualizacao das recompensas liberadas. Apenas dono, administradores ou developer podem alterar vantagens.</p>
+        ) : developerUser ? (
           <>
             <Button variant="primary" type="button" onClick={addDeveloperBoost}>
               <Sparkles size={18} />
@@ -13291,6 +13637,7 @@ function ServerSettingsDialog({
           <p className="settings-notice">Estrelas sao recurso pago. A opcao gratuita aparece apenas para conta autorizada de developer.</p>
         )}
         {renderSettingsNotice()}
+        <fieldset className="boost-perk-editor" disabled={!canConfigureBoostPerks}>
         <div className="settings-row">
           <div>
             <strong>Mostrar barra de progresso das estrelas</strong>
@@ -13456,6 +13803,15 @@ function ServerSettingsDialog({
                 <input value={serverAccentDraft} onChange={(event) => setServerAccentDraft(event.target.value)} type="color" />
                 <button type="button" onClick={() => saveBoostPerks({ serverAccentColor: serverAccentDraft })}>
                   Salvar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setServerAccentDraft("#39c6a3");
+                    saveBoostPerks({ serverAccentColor: null });
+                  }}
+                >
+                  Resetar
                 </button>
               </div>
             ) : (
@@ -13664,6 +14020,20 @@ function ServerSettingsDialog({
           >
             {serverGuideBannerPreview ? null : <ImageIcon size={24} />}
           </div>
+        </div>
+        </fieldset>
+        <div className="boost-reward-grid" aria-label="Trinta niveis de recompensas">
+          {boostLevelTargets.map((target, index) => {
+            const level = index + 1;
+            const unlocked = boostLevel >= level;
+            return (
+              <article className={unlocked ? "boost-reward-card unlocked" : "boost-reward-card"} key={`boost-reward-${level}`}>
+                <span>NV. {level}</span>
+                <strong>{boostRewardLabels[index] ?? `Recompensa ${level}`}</strong>
+                <small>{unlocked ? "Liberado" : `${activeBoosts.length}/${target} estrelas`}</small>
+              </article>
+            );
+          })}
         </div>
         <div className="boost-list">
           {activeBoosts.length ? (
@@ -14061,10 +14431,16 @@ function ServerSettingsDialog({
       <section className="server-settings-panel" aria-label="Configuracoes do servidor">
         <aside className="settings-nav">
           <strong>{server.name}</strong>
+          {canAdministerServerSettings ? (
+            <>
           <button className={view === "profile" ? "active" : ""} type="button" onClick={() => setView("profile")}>Perfil do servidor</button>
           <button className={view === "tag" ? "active" : ""} type="button" onClick={() => setView("tag")}>Tag do servidor</button>
           <button className={view === "engagement" ? "active" : ""} type="button" onClick={() => setView("engagement")}>Engajamento</button>
+            </>
+          ) : null}
           <button className={view === "boosts" ? "active" : ""} type="button" onClick={() => setView("boosts")}>Vantagens de Estrelas</button>
+          {canAdministerServerSettings ? (
+            <>
           <span>EXPRESSOES</span>
           <button className={view === "emoji" ? "active" : ""} type="button" onClick={() => setView("emoji")}>Emoji</button>
           <button className={view === "stickers" ? "active" : ""} type="button" onClick={() => setView("stickers")}>Figurinhas</button>
@@ -14089,6 +14465,8 @@ function ServerSettingsDialog({
           </button>
           <button className={view === "onboarding" ? "active" : ""} type="button" onClick={() => setView("onboarding")}>Onboarding</button>
           <button className={view === "analytics" ? "active" : ""} type="button" onClick={() => setView("analytics")}>Analises do servidor</button>
+            </>
+          ) : null}
         </aside>
         <main className="settings-body">
           <button className="settings-close" title="Fechar" type="button" onClick={onClose}>

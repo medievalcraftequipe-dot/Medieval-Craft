@@ -92,6 +92,10 @@ export interface DeleteAccountInput {
   currentPassword: string;
 }
 
+export interface DeleteServerInput {
+  currentPassword: string;
+}
+
 export interface PasswordResetRequestInput {
   emailOrUsername: string;
 }
