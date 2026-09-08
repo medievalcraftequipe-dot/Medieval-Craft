@@ -82,7 +82,7 @@ interface UpdateProfilePayload {
   bannerUrl?: string | null;
   bio?: string | null;
   customStatus?: string | null;
-  presence?: "ONLINE" | "IDLE" | "DND" | "INVISIBLE";
+  presence?: "ONLINE" | "IDLE" | "DND" | "INVISIBLE" | "OFFLINE";
   blockNonFriendDirectMessages?: boolean;
 }
 
@@ -551,11 +551,28 @@ export class AuthService {
     };
   }
 
-  async logout(sessionId: string): Promise<{ ok: true }> {
+  async logout(userId: string, sessionId: string): Promise<{ ok: true }> {
+    const now = new Date();
     await this.prisma.session.updateMany({
       where: { id: sessionId, revokedAt: null },
-      data: { revokedAt: new Date() }
+      data: { revokedAt: now }
     });
+
+    const activeSessions = await this.prisma.session.count({
+      where: {
+        userId,
+        id: { not: sessionId },
+        revokedAt: null,
+        expiresAt: { gt: now }
+      }
+    });
+
+    if (activeSessions === 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { presence: "OFFLINE" }
+      });
+    }
 
     return { ok: true };
   }

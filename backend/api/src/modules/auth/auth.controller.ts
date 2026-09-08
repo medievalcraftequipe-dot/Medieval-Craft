@@ -127,7 +127,7 @@ export class AuthController {
   @Post("logout")
   @UseGuards(JwtAuthGuard)
   logout(@Req() request: AuthenticatedRequest) {
-    return this.auth.logout(request.user.sessionId);
+    return this.auth.logout(request.user.id, request.user.sessionId);
   }
 
   @Delete("me")

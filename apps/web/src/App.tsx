@@ -214,6 +214,32 @@ const voiceAudioConstraints: MediaTrackConstraints = {
   sampleRate: { ideal: 48000 },
   sampleSize: { ideal: 16 }
 };
+const defaultVoiceIceServers: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:global.stun.twilio.com:3478" }
+];
+
+function getVoiceIceServers() {
+  const turnUrls = String(import.meta.env.VITE_TEMPEST_LIGHT_TURN_URLS || "")
+    .split(",")
+    .map((url) => url.trim())
+    .filter(Boolean);
+  const username = String(import.meta.env.VITE_TEMPEST_LIGHT_TURN_USERNAME || "").trim();
+  const credential = String(import.meta.env.VITE_TEMPEST_LIGHT_TURN_CREDENTIAL || "").trim();
+  const turnServers = turnUrls.map((url): RTCIceServer =>
+    username && credential ? { urls: url, username, credential } : { urls: url }
+  );
+
+  return [...defaultVoiceIceServers, ...turnServers];
+}
+const autoPresenceIdleAfterMs = 5 * 60_000;
+const autoPresenceCheckIntervalMs = 15_000;
+const autoPresenceHeartbeatMs = 45_000;
+const autoPresenceActivityEvents = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "focus"] as const;
+
+function isManualPresenceMode(presence: PresenceStatus) {
+  return presence === "DND" || presence === "INVISIBLE";
+}
 type CreateServerStep = "start" | "purpose" | "personalize" | "discord";
 type EditablePresenceStatus = Exclude<PresenceStatus, "OFFLINE">;
 type ServerSettingsView =
@@ -1356,14 +1382,66 @@ function useOnlineVoiceCall({
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const signalCursorRef = useRef<string | null>(null);
+  const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const reconnectTimersRef = useRef<Map<string, number>>(new Map());
+  const connectionRetriesRef = useRef<Map<string, number>>(new Map());
+  const activeRef = useRef(active);
+  const participantsRef = useRef(participants);
+  const channelNameRef = useRef(channelName);
+
+  useEffect(() => {
+    activeRef.current = active;
+    participantsRef.current = participants;
+    channelNameRef.current = channelName;
+  }, [active, participants, channelName]);
+
+  function clearReconnectTimer(remoteUserId: string) {
+    const timer = reconnectTimersRef.current.get(remoteUserId);
+    if (timer) {
+      window.clearTimeout(timer);
+    }
+    reconnectTimersRef.current.delete(remoteUserId);
+  }
+
+  function remoteParticipantIsActive(remoteUserId: string) {
+    return (
+      activeRef.current &&
+      Boolean(channelNameRef.current) &&
+      participantsRef.current.some((participant) => participant.userId === remoteUserId && participant.channelName === channelNameRef.current)
+    );
+  }
+
+  function queueIceCandidate(remoteUserId: string, candidate: RTCIceCandidateInit) {
+    const candidates = pendingIceCandidatesRef.current.get(remoteUserId) ?? [];
+    candidates.push(candidate);
+    pendingIceCandidatesRef.current.set(remoteUserId, candidates.slice(-50));
+  }
+
+  async function flushIceCandidates(remoteUserId: string, peer: RTCPeerConnection) {
+    if (!peer.remoteDescription) {
+      return;
+    }
+
+    const candidates = pendingIceCandidatesRef.current.get(remoteUserId);
+    if (!candidates?.length) {
+      return;
+    }
+
+    pendingIceCandidatesRef.current.delete(remoteUserId);
+    for (const candidate of candidates) {
+      await peer.addIceCandidate(candidate).catch(() => undefined);
+    }
+  }
 
   function closePeer(remoteUserId: string) {
+    clearReconnectTimer(remoteUserId);
     const peer = peersRef.current.get(remoteUserId);
     if (peer) {
       peer.close();
     }
     peersRef.current.delete(remoteUserId);
     offerStartedRef.current.delete(remoteUserId);
+    pendingIceCandidatesRef.current.delete(remoteUserId);
     setRemoteStreams((current) => {
       const { [remoteUserId]: _removed, ...next } = current;
       return next;
@@ -1371,9 +1449,13 @@ function useOnlineVoiceCall({
   }
 
   function closeAllPeers() {
+    reconnectTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    reconnectTimersRef.current.clear();
     peersRef.current.forEach((peer) => peer.close());
     peersRef.current.clear();
     offerStartedRef.current.clear();
+    pendingIceCandidatesRef.current.clear();
+    connectionRetriesRef.current.clear();
     signalCursorRef.current = null;
     setRemoteStreams({});
   }
@@ -1399,10 +1481,7 @@ function useOnlineVoiceCall({
 
     const peer = new RTCPeerConnection({
       iceCandidatePoolSize: 10,
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:global.stun.twilio.com:3478" }
-      ]
+      iceServers: getVoiceIceServers()
     });
 
     [localStreamRef.current, screenStreamRef.current].forEach((stream) => {
@@ -1423,11 +1502,24 @@ function useOnlineVoiceCall({
         return;
       }
 
+      connectionRetriesRef.current.delete(remoteUserId);
+      clearReconnectTimer(remoteUserId);
       setRemoteStreams((current) => ({ ...current, [remoteUserId]: stream }));
     });
 
     peer.addEventListener("connectionstatechange", () => {
-      if (peer.connectionState === "failed" || peer.connectionState === "closed") {
+      if (peer.connectionState === "connected") {
+        connectionRetriesRef.current.delete(remoteUserId);
+        clearReconnectTimer(remoteUserId);
+        return;
+      }
+
+      if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
+        scheduleReconnect(remoteUserId);
+        return;
+      }
+
+      if (peer.connectionState === "closed") {
         closePeer(remoteUserId);
       }
     });
@@ -1452,6 +1544,36 @@ function useOnlineVoiceCall({
     sendVoiceSignal(remoteUserId, "offer", serializeSessionDescription(offer));
   }
 
+  function scheduleReconnect(remoteUserId: string) {
+    if (!remoteParticipantIsActive(remoteUserId)) {
+      closePeer(remoteUserId);
+      return;
+    }
+
+    if (reconnectTimersRef.current.has(remoteUserId)) {
+      return;
+    }
+
+    const retryCount = connectionRetriesRef.current.get(remoteUserId) ?? 0;
+    if (retryCount >= 4) {
+      closePeer(remoteUserId);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      reconnectTimersRef.current.delete(remoteUserId);
+      if (!remoteParticipantIsActive(remoteUserId)) {
+        closePeer(remoteUserId);
+        return;
+      }
+
+      closePeer(remoteUserId);
+      connectionRetriesRef.current.set(remoteUserId, retryCount + 1);
+      void startOffer(remoteUserId).catch(() => closePeer(remoteUserId));
+    }, 900 + retryCount * 1400);
+    reconnectTimersRef.current.set(remoteUserId, timer);
+  }
+
   async function applyVoiceSignal(signal: OnlineVoiceSignal) {
     if (signal.fromUserId === currentUserId) {
       return;
@@ -1465,6 +1587,7 @@ function useOnlineVoiceCall({
       }
 
       await peer.setRemoteDescription(offer);
+      await flushIceCandidates(signal.fromUserId, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       sendVoiceSignal(signal.fromUserId, "answer", serializeSessionDescription(answer));
@@ -1478,12 +1601,17 @@ function useOnlineVoiceCall({
       }
 
       await peer.setRemoteDescription(answer);
+      await flushIceCandidates(signal.fromUserId, peer);
       return;
     }
 
     const candidate = parseIceCandidate(signal.payload);
     if (candidate) {
-      await peer.addIceCandidate(candidate).catch(() => undefined);
+      if (peer.remoteDescription) {
+        await peer.addIceCandidate(candidate).catch(() => queueIceCandidate(signal.fromUserId, candidate));
+      } else {
+        queueIceCandidate(signal.fromUserId, candidate);
+      }
     }
   }
 
@@ -4345,6 +4473,10 @@ function WorkspaceShell({
   const serverSyncLoadedRef = useRef(false);
   const serverSyncTimeoutRef = useRef<number | null>(null);
   const serversRef = useRef(servers);
+  const userRef = useRef(user);
+  const lastPresenceActivityAtRef = useRef(Date.now());
+  const lastPresenceHeartbeatAtRef = useRef(0);
+  const presenceUpdateInFlightRef = useRef<Promise<void> | null>(null);
   const previousOnlineVoiceServerRef = useRef<string | null>(null);
   const serverFileInputRef = useRef<HTMLInputElement | null>(null);
   const directFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -4365,6 +4497,121 @@ function WorkspaceShell({
   const activeMemberTimeoutNotice = getMemberTimeoutNotice(activeServerMember, nowTick);
 
   serversRef.current = servers;
+  userRef.current = user;
+
+  useEffect(() => {
+    if (!api) {
+      return undefined;
+    }
+
+    let disposed = false;
+    const presenceApi = api;
+    const apiBaseUrl = API_URL.replace(/\/$/, "");
+
+    function applyLocalPresence(nextPresence: PresenceStatus) {
+      const currentUser = userRef.current;
+      if (currentUser.presence === nextPresence) {
+        return;
+      }
+
+      const nextUser = { ...currentUser, presence: nextPresence };
+      userRef.current = nextUser;
+      onUserChange(nextUser);
+    }
+
+    async function pushPresence(nextPresence: PresenceStatus, options: { force?: boolean; heartbeat?: boolean } = {}) {
+      const currentUser = userRef.current;
+      const manualMode = isManualPresenceMode(currentUser.presence);
+      if (manualMode && !options.force) {
+        return;
+      }
+
+      const now = Date.now();
+      if (
+        currentUser.presence === nextPresence &&
+        !options.force &&
+        (!options.heartbeat || now - lastPresenceHeartbeatAtRef.current < autoPresenceHeartbeatMs)
+      ) {
+        return;
+      }
+
+      applyLocalPresence(nextPresence);
+      lastPresenceHeartbeatAtRef.current = now;
+      const request = presenceApi
+        .updateMe({ presence: nextPresence })
+        .then((updatedUser) => {
+          if (!disposed) {
+            const mergedUser = mergeUserWithLocalProfileImages(updatedUser);
+            userRef.current = mergedUser;
+            onUserChange(mergedUser);
+          }
+        })
+        .catch(() => undefined);
+
+      presenceUpdateInFlightRef.current = request;
+      await request;
+      if (presenceUpdateInFlightRef.current === request) {
+        presenceUpdateInFlightRef.current = null;
+      }
+    }
+
+    function refreshPresenceFromActivity() {
+      const currentUser = userRef.current;
+      if (isManualPresenceMode(currentUser.presence)) {
+        return;
+      }
+
+      const idle = document.hidden || Date.now() - lastPresenceActivityAtRef.current >= autoPresenceIdleAfterMs;
+      const nextPresence: PresenceStatus = idle ? "IDLE" : "ONLINE";
+      void pushPresence(nextPresence, { heartbeat: true });
+    }
+
+    function registerActivity() {
+      lastPresenceActivityAtRef.current = Date.now();
+      if (!document.hidden) {
+        void pushPresence("ONLINE");
+      }
+    }
+
+    function sendOfflinePresence() {
+      applyLocalPresence("OFFLINE");
+      const token = localStorage.getItem(TOKEN_KEY);
+      if (!apiBaseUrl || !token) {
+        return;
+      }
+
+      void fetch(`${apiBaseUrl}/auth/me`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ presence: "OFFLINE" }),
+        keepalive: true
+      }).catch(() => undefined);
+    }
+
+    autoPresenceActivityEvents.forEach((eventName) => {
+      window.addEventListener(eventName, registerActivity, { passive: true });
+    });
+    document.addEventListener("visibilitychange", refreshPresenceFromActivity);
+    window.addEventListener("pagehide", sendOfflinePresence);
+    window.addEventListener("beforeunload", sendOfflinePresence);
+
+    registerActivity();
+    const interval = window.setInterval(refreshPresenceFromActivity, autoPresenceCheckIntervalMs);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      autoPresenceActivityEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, registerActivity);
+      });
+      document.removeEventListener("visibilitychange", refreshPresenceFromActivity);
+      window.removeEventListener("pagehide", sendOfflinePresence);
+      window.removeEventListener("beforeunload", sendOfflinePresence);
+    };
+  }, [api, onUserChange]);
 
   useEffect(() => {
     if (!composerPasteMenu) {

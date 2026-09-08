@@ -82,8 +82,8 @@ export class UpdateProfileDto {
   customStatus?: string | null;
 
   @IsOptional()
-  @IsIn(["ONLINE", "IDLE", "DND", "INVISIBLE"])
-  presence?: "ONLINE" | "IDLE" | "DND" | "INVISIBLE";
+  @IsIn(["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"])
+  presence?: "ONLINE" | "IDLE" | "DND" | "INVISIBLE" | "OFFLINE";
 
   @IsOptional()
   @IsBoolean()
