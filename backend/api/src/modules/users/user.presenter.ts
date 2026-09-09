@@ -13,6 +13,7 @@ export function presentAuthUser(user: User) {
     presence: user.presence,
     emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
     blockNonFriendDirectMessages: user.blockNonFriendDirectMessages,
+    starBalance: user.starBalance,
     twoFactorEnabled: user.twoFactorEnabled,
     createdAt: user.createdAt.toISOString()
   };

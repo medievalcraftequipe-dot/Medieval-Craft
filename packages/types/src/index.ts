@@ -12,6 +12,7 @@ export interface AuthUser {
   presence: PresenceStatus;
   emailVerifiedAt: string | null;
   blockNonFriendDirectMessages: boolean;
+  starBalance: number;
   twoFactorEnabled: boolean;
   createdAt: string;
 }
@@ -96,6 +97,14 @@ export interface DeleteServerInput {
   currentPassword: string;
 }
 
+export interface AddStarBalanceInput {
+  amount: number;
+}
+
+export interface StarBalanceResponse {
+  user: AuthUser;
+}
+
 export interface PasswordResetRequestInput {
   emailOrUsername: string;
 }
@@ -150,9 +159,12 @@ export interface PublicUser {
   username: string;
   displayName: string;
   avatarUrl: string | null;
+  bannerUrl: string | null;
+  bio: string | null;
   customStatus: string | null;
   presence: PresenceStatus;
   blockNonFriendDirectMessages: boolean;
+  starBalance: number;
 }
 
 export interface DirectMessage {
@@ -341,6 +353,16 @@ export interface DeleteServerMessageResponse {
   messageId: string;
   serverId: string;
   channelName: string;
+}
+
+export interface AddServerStarsInput {
+  amount: number;
+}
+
+export interface AddServerStarsResponse {
+  server: unknown;
+  user: AuthUser;
+  starsSpent: number;
 }
 
 export interface CreateServerInviteInput {

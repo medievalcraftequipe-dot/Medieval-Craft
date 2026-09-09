@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { hash, verify } from "@node-rs/argon2";
@@ -19,6 +19,10 @@ import { ResendVerificationDto } from "./dto/resend-verification.dto";
 import { DisableTwoFactorDto, EnableTwoFactorDto, SetupTwoFactorDto } from "./dto/two-factor.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { validatePasswordPolicy } from "./password-policy";
+
+const maxUserStarBalance = 999_999_999;
+const fallbackDeveloperEmails = ["rafaeltanki1212@gmail.com", "izigamer47@gmail.com"];
+const fallbackDeveloperUsernames = ["armadura_prime"];
 
 interface ClientMetadata {
   ipAddress?: string;
@@ -242,6 +246,26 @@ export class AuthService {
     });
 
     return presentAuthUser(user);
+  }
+
+  async addDeveloperStars(userId: string, amountInput: number) {
+    const currentUser = await this.users.findById(userId);
+    if (!currentUser) {
+      throw new UnauthorizedException("User not found.");
+    }
+
+    if (!this.isDeveloperAccount(currentUser)) {
+      throw new ForbiddenException("Somente conta developer pode adicionar saldo de estrelas.");
+    }
+
+    const amount = Math.min(Math.max(Math.floor(amountInput) || 0, 1), maxUserStarBalance);
+    const nextBalance = Math.min(maxUserStarBalance, currentUser.starBalance + amount);
+    const user = await this.prisma.user.update({
+      where: { id: userId },
+      data: { starBalance: nextBalance }
+    });
+
+    return { user: presentAuthUser(user) };
   }
 
   async changeEmail(userId: string, dto: ChangeEmailDto) {
@@ -549,6 +573,24 @@ export class AuthService {
       ...presentAuthUser(session.user),
       sessionId: session.id
     };
+  }
+
+  private isDeveloperAccount(user: Pick<User, "email" | "username">) {
+    const configuredEmails = this.readConfiguredList("TEMPEST_LIGHT_DEVELOPER_EMAILS");
+    const configuredUsernames = this.readConfiguredList("TEMPEST_LIGHT_DEVELOPER_USERNAMES");
+    const email = user.email.trim().toLowerCase();
+    const username = user.username.trim().toLowerCase();
+
+    return [...configuredEmails, ...fallbackDeveloperEmails].map((item) => item.toLowerCase()).includes(email)
+      || [...configuredUsernames, ...fallbackDeveloperUsernames].map((item) => item.toLowerCase()).includes(username);
+  }
+
+  private readConfiguredList(key: string) {
+    const value = this.config.get<string>(key);
+    return String(value ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
   }
 
   async logout(userId: string, sessionId: string): Promise<{ ok: true }> {

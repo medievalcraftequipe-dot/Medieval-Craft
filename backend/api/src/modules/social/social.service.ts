@@ -342,9 +342,12 @@ export class SocialService {
       username: user.username,
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
+      bannerUrl: user.bannerUrl,
+      bio: user.bio,
       customStatus: user.customStatus,
       presence: this.presentPublicPresence(user.presence),
-      blockNonFriendDirectMessages: user.blockNonFriendDirectMessages
+      blockNonFriendDirectMessages: user.blockNonFriendDirectMessages,
+      starBalance: user.starBalance
     };
   }
 

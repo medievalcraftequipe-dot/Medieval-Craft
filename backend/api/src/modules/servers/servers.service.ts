@@ -4,6 +4,7 @@ import type { Prisma, User } from "@prisma/client";
 import { verify } from "@node-rs/argon2";
 import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../common/prisma/prisma.service";
+import { presentAuthUser } from "../users/user.presenter";
 
 type ClientServerState = Record<string, unknown>;
 type InviteDuration = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
@@ -11,6 +12,7 @@ type InviteDuration = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
 const voiceSessionTtlMs = 8 * 60_000;
 const voiceSignalTtlMs = 5 * 60_000;
 const channelNameMaxLength = 100;
+const maxServerStarSupportAmount = 25;
 const fallbackDeveloperEmails = ["rafaeltanki1212@gmail.com", "izigamer47@gmail.com"];
 const fallbackDeveloperUsernames = ["armadura_prime"];
 
@@ -68,7 +70,7 @@ export class ServersService {
     return {
       servers: servers
         .map((server) => this.presentServerState(server))
-        .filter((server) => server.isDiscoverable === true && this.getPresentedMemberCount(server) >= 1000)
+        .filter((server) => server.isDiscoverable === true)
     };
   }
 
@@ -168,11 +170,120 @@ export class ServersService {
       throw new UnauthorizedException("Senha atual incorreta.");
     }
 
-    await this.prisma.server.delete({
-      where: { id: serverId }
-    });
+    const [members, roles, channels] = await Promise.all([
+      this.prisma.serverMember.findMany({ where: { serverId }, select: { id: true } }),
+      this.prisma.role.findMany({ where: { serverId }, select: { id: true } }),
+      this.prisma.channel.findMany({ where: { serverId }, select: { id: true } })
+    ]);
+    const memberIds = members.map((member) => member.id);
+    const roleIds = roles.map((role) => role.id);
+    const channelIds = channels.map((channel) => channel.id);
+    const channelMessages = channelIds.length
+      ? await this.prisma.message.findMany({ where: { channelId: { in: channelIds } }, select: { id: true } })
+      : [];
+    const channelMessageIds = channelMessages.map((message) => message.id);
+
+    await this.prisma.$transaction([
+      this.prisma.voiceSignal.deleteMany({ where: { serverId } }),
+      this.prisma.serverVoiceSession.deleteMany({ where: { serverId } }),
+      this.prisma.serverChannelMessage.deleteMany({ where: { serverId } }),
+      this.prisma.invite.deleteMany({ where: { serverId } }),
+      this.prisma.ban.deleteMany({ where: { serverId } }),
+      this.prisma.moderationAction.deleteMany({ where: { serverId } }),
+      this.prisma.auditLog.deleteMany({ where: { serverId } }),
+      this.prisma.customEmoji.deleteMany({ where: { serverId } }),
+      this.prisma.sticker.deleteMany({ where: { serverId } }),
+      this.prisma.permissionOverride.deleteMany({ where: { serverId } }),
+      this.prisma.reaction.deleteMany({ where: { messageId: { in: channelMessageIds } } }),
+      this.prisma.messageAttachment.deleteMany({ where: { messageId: { in: channelMessageIds } } }),
+      this.prisma.message.deleteMany({ where: { id: { in: channelMessageIds } } }),
+      this.prisma.serverMemberRole.deleteMany({
+        where: {
+          OR: [
+            { memberId: { in: memberIds } },
+            { roleId: { in: roleIds } }
+          ]
+        }
+      }),
+      this.prisma.channel.deleteMany({ where: { serverId } }),
+      this.prisma.category.deleteMany({ where: { serverId } }),
+      this.prisma.role.deleteMany({ where: { serverId } }),
+      this.prisma.serverMember.deleteMany({ where: { serverId } }),
+      this.prisma.server.delete({ where: { id: serverId } })
+    ]);
 
     return { ok: true as const, serverId };
+  }
+
+  async addStarsToServer(userId: string, serverId: string, amountInput: number) {
+    await this.ensureMember(serverId, userId);
+
+    const amount = Math.min(Math.max(Math.floor(amountInput) || 0, 1), maxServerStarSupportAmount);
+    const [server, user] = await Promise.all([
+      this.prisma.server.findUnique({
+        where: { id: serverId },
+        include: this.serverStateInclude
+      }),
+      this.getUser(userId)
+    ]);
+
+    if (!server) {
+      throw new NotFoundException("Servidor nao encontrado.");
+    }
+
+    if (user.starBalance < amount) {
+      throw new ForbiddenException("Saldo de estrelas insuficiente.");
+    }
+
+    const now = new Date();
+    const expiresAt = new Date(now);
+    expiresAt.setDate(expiresAt.getDate() + 30);
+    const currentState = this.presentServerState(server);
+    const activeBoosts = Array.isArray(currentState.boosts)
+      ? currentState.boosts.filter((boost) => this.isRecord(boost) && !this.boostExpired(boost))
+      : [];
+    const boosts = Array.from({ length: amount }, (_, index) => ({
+      id: `boost-${now.getTime()}-${index}-${randomBytes(3).toString("hex")}`,
+      appliedBy: user.id,
+      appliedByName: user.displayName,
+      createdAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString()
+    }));
+    const nextState: ClientServerState = {
+      ...currentState,
+      boosts: [...boosts, ...activeBoosts],
+      boostProgressVisible: true
+    };
+
+    const [updatedServer, updatedUser] = await this.prisma.$transaction(async (tx) => {
+      const decrement = await tx.user.updateMany({
+        where: {
+          id: userId,
+          starBalance: { gte: amount }
+        },
+        data: {
+          starBalance: { decrement: amount }
+        }
+      });
+
+      if (decrement.count !== 1) {
+        throw new ForbiddenException("Saldo de estrelas insuficiente.");
+      }
+
+      const savedServer = await tx.server.update({
+        where: { id: serverId },
+        data: { clientState: this.toInputJson(nextState) },
+        include: this.serverStateInclude
+      });
+      const savedUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+      return [savedServer, savedUser] as const;
+    });
+
+    return {
+      server: this.presentServerState(updatedServer),
+      user: presentAuthUser(updatedUser),
+      starsSpent: amount
+    };
   }
 
   async leaveServer(userId: string, serverId: string) {
@@ -888,6 +999,7 @@ export class ServersService {
         bannerUrl: membership.user.bannerUrl,
         bio: membership.user.bio,
         presence: membership.user.presence === "INVISIBLE" ? "OFFLINE" : membership.user.presence,
+        starBalance: membership.user.starBalance,
         accountCreatedAt: membership.user.createdAt.toISOString(),
         joinedAt: membership.joinedAt.toISOString(),
         roleIds: this.readStringArray(existing.roleIds, ["everyone"]),
@@ -915,6 +1027,7 @@ export class ServersService {
       bannerUrl: user.bannerUrl,
       bio: user.bio,
       presence: user.presence,
+      starBalance: user.starBalance,
       accountCreatedAt: user.createdAt.toISOString(),
       joinedAt: existingIndex >= 0 ? this.readOptionalString(members[existingIndex].joinedAt) ?? joinedAt.toISOString() : joinedAt.toISOString(),
       roleIds,
@@ -982,6 +1095,16 @@ export class ServersService {
           .map((item) => item.trim())
           .filter(Boolean)
       : [];
+  }
+
+  private boostExpired(boost: Record<string, unknown>) {
+    const expiresAt = this.readOptionalString(boost.expiresAt);
+    if (!expiresAt) {
+      return true;
+    }
+
+    const expiresAtTime = Date.parse(expiresAt);
+    return !Number.isFinite(expiresAtTime) || expiresAtTime <= Date.now();
   }
 
   private async assertNotBanned(serverId: string, userId: string) {

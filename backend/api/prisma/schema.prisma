@@ -78,6 +78,7 @@ model User {
   status                  UserAccountStatus    @default(ACTIVE)
   emailVerifiedAt         DateTime?
   blockNonFriendDirectMessages Boolean          @default(false)
+  starBalance             Int                  @default(0)
   twoFactorEnabled        Boolean              @default(false)
   twoFactorSecret         String?
   createdAt               DateTime             @default(now())

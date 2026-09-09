@@ -203,6 +203,7 @@ const chatInlineAttachmentMaxBytes = 24 * 1024 * 1024;
 const chatImageMaxWidth = 1280;
 const chatImageMaxHeight = 720;
 const profileImageDataUrlMaxBytes = 4 * 1024 * 1024;
+const maxUserStarBalance = 999_999_999;
 const youtubeHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$/i;
 const trustedMediaHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$|(^|\.)twitch\.tv$/i;
 const giphyHostPattern = /(^|\.)giphy\.com$|(^|\.)media\.giphy\.com$|(^|\.)i\.giphy\.com$/i;
@@ -248,6 +249,24 @@ function getVoiceIceServers() {
 
   return [...defaultVoiceIceServers, ...turnServers];
 }
+
+function markRealtimeTrack(track: MediaStreamTrack, hint: "speech" | "motion" | "detail") {
+  try {
+    track.contentHint = hint;
+  } catch {
+    // Older Chromium builds can expose contentHint as read-only; the stream still works without it.
+  }
+}
+
+function markRealtimeStream(stream: MediaStream, options: { audio?: "speech"; video?: "motion" | "detail" }) {
+  if (options.audio) {
+    stream.getAudioTracks().forEach((track) => markRealtimeTrack(track, options.audio ?? "speech"));
+  }
+  if (options.video) {
+    stream.getVideoTracks().forEach((track) => markRealtimeTrack(track, options.video ?? "motion"));
+  }
+}
+
 const autoPresenceIdleAfterMs = 5 * 60_000;
 const autoPresenceCheckIntervalMs = 15_000;
 const autoPresenceHeartbeatMs = 45_000;
@@ -438,6 +457,7 @@ interface ServerMemberDefinition {
   bannerUrl?: string | null;
   bio?: string | null;
   presence: PresenceStatus;
+  starBalance: number;
   accountCreatedAt?: string | null;
   joinedAt: string;
   roleIds: string[];
@@ -707,6 +727,7 @@ interface DirectContact {
   bio?: string | null;
   customStatus?: string | null;
   createdAt?: string | null;
+  starBalance?: number;
   status: PresenceStatus;
   isFriend: boolean;
   blocksNonFriendMessages: boolean;
@@ -722,6 +743,7 @@ interface ProfileCardUser {
   bio?: string | null;
   customStatus?: string | null;
   presence: PresenceStatus;
+  starBalance: number;
   accountCreatedAt?: string | null;
   serverJoinedAt?: string | null;
   isOwnProfile: boolean;
@@ -1281,7 +1303,7 @@ function useVoiceActivity(active: boolean, muted: boolean, providedStream?: Medi
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = 1024;
-        analyser.smoothingTimeConstant = 0.35;
+        analyser.smoothingTimeConstant = 0.22;
         source.connect(analyser);
 
         const samples = new Uint8Array(analyser.fftSize);
@@ -1300,7 +1322,7 @@ function useVoiceActivity(active: boolean, muted: boolean, providedStream?: Medi
           });
 
           const rms = Math.sqrt(total / samples.length);
-          const nextSpeaking = rms > 0.022;
+          const nextSpeaking = rms > 0.012;
           if (nextSpeaking !== lastSpeaking) {
             lastSpeaking = nextSpeaking;
             setSpeaking(nextSpeaking);
@@ -1500,12 +1522,14 @@ function useOnlineVoiceCall({
     }
 
     const peer = new RTCPeerConnection({
+      bundlePolicy: "max-bundle",
       iceCandidatePoolSize: 10,
       iceServers: getVoiceIceServers()
     });
 
     [localStreamRef.current, screenStreamRef.current].forEach((stream) => {
       stream?.getTracks().forEach((track) => {
+        markRealtimeTrack(track, track.kind === "audio" ? "speech" : "motion");
         peer.addTrack(track, stream);
       });
     });
@@ -1703,6 +1727,7 @@ function useOnlineVoiceCall({
     }
 
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    markRealtimeStream(stream, { audio: "speech", video: "motion" });
     screenStreamRef.current = stream;
     stream.getVideoTracks().forEach((track) => {
       track.addEventListener("ended", () => stopScreenShare(), { once: true });
@@ -1738,6 +1763,7 @@ function useOnlineVoiceCall({
         }
 
         stream.getAudioTracks().forEach((track) => {
+          markRealtimeTrack(track, "speech");
           track.enabled = !muted;
         });
         localStreamRef.current = stream;
@@ -1817,7 +1843,7 @@ function useOnlineVoiceCall({
     }
 
     void pollSignals();
-    const interval = window.setInterval(() => void pollSignals(), 1500);
+    const interval = window.setInterval(() => void pollSignals(), 650);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -2573,6 +2599,7 @@ function normalizeServerMember(member: Partial<ServerMemberDefinition>): ServerM
     bannerUrl: sanitizeImageSource(member.bannerUrl),
     bio: typeof member.bio === "string" && member.bio.trim() ? member.bio.trim().slice(0, 240) : null,
     presence: member.presence ?? (member.isBot ? "OFFLINE" : "ONLINE"),
+    starBalance: clampStarBalance(member.starBalance),
     accountCreatedAt:
       typeof member.accountCreatedAt === "string" && !Number.isNaN(Date.parse(member.accountCreatedAt)) ? member.accountCreatedAt : joinedAt,
     joinedAt,
@@ -2628,6 +2655,7 @@ function createServerBotMember(bot: ServerBotIntegration): ServerMemberDefinitio
     bannerUrl: bot.bannerUrl,
     bio: bot.description,
     presence: isBotRuntimeOnline(bot) ? "ONLINE" : "OFFLINE",
+    starBalance: 0,
     accountCreatedAt: bot.addedAt,
     joinedAt: bot.addedAt,
     roleIds: ["everyone"],
@@ -2839,6 +2867,14 @@ function sanitizeAttachmentSource(value: string | null | undefined) {
   return isSafeAttachmentSource(source) ? source : null;
 }
 
+function clampStarBalance(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.min(maxUserStarBalance, Math.max(0, Math.floor(value)));
+}
+
 function getLocalProfileImagesKey(user: Pick<AuthUser, "id">) {
   return `${LOCAL_PROFILE_IMAGES_PREFIX}:${user.id}`;
 }
@@ -2861,7 +2897,8 @@ function mergeUserWithLocalProfileImages(user: AuthUser) {
   return {
     ...user,
     avatarUrl: localImages.avatarUrl ?? user.avatarUrl,
-    bannerUrl: localImages.bannerUrl ?? user.bannerUrl
+    bannerUrl: localImages.bannerUrl ?? user.bannerUrl,
+    starBalance: clampStarBalance(user.starBalance)
   };
 }
 
@@ -3519,8 +3556,11 @@ function directSummaryToContact(summary: DirectConversationSummary): DirectConta
     username: summary.participant.username,
     displayName: summary.participant.displayName,
     avatarUrl: summary.participant.avatarUrl,
+    bannerUrl: summary.participant.bannerUrl,
+    bio: summary.participant.bio,
     customStatus: summary.participant.customStatus,
     createdAt: null,
+    starBalance: clampStarBalance(summary.participant.starBalance),
     status: summary.participant.presence,
     isFriend: summary.isFriend,
     blocksNonFriendMessages: !summary.canMessage
@@ -3533,8 +3573,11 @@ function directConversationToContact(conversation: DirectConversation): DirectCo
     username: conversation.participant.username,
     displayName: conversation.participant.displayName,
     avatarUrl: conversation.participant.avatarUrl,
+    bannerUrl: conversation.participant.bannerUrl,
+    bio: conversation.participant.bio,
     customStatus: conversation.participant.customStatus,
     createdAt: null,
+    starBalance: clampStarBalance(conversation.participant.starBalance),
     status: conversation.participant.presence,
     isFriend: conversation.isFriend,
     blocksNonFriendMessages: !conversation.canMessage
@@ -4541,6 +4584,7 @@ function WorkspaceShell({
   const [serverNotice, setServerNotice] = useState<string | null>(null);
   const [starSupportNotice, setStarSupportNotice] = useState<string | null>(null);
   const [starSupportAmount, setStarSupportAmount] = useState(1);
+  const [starGrantAmount, setStarGrantAmount] = useState(1000);
   const [discoverQuery, setDiscoverQuery] = useState("");
   const [inviteCodeDraft, setInviteCodeDraft] = useState("");
   const [messages, setMessages] = useState<LocalMessage[]>(() => savedWorkspaceState?.messages ?? initialMessages);
@@ -4816,7 +4860,7 @@ function WorkspaceShell({
         .sort((first, second) => first.name.localeCompare(second.name, "pt-BR")),
     [servers, user.id, user.username]
   );
-  const starSupportBalance = isDeveloperUser(user) ? 9999 : 0;
+  const starSupportBalance = clampStarBalance(user.starBalance);
   const activeVoiceChannelDetails =
     activeServer && voiceChannel
       ? getAllServerChannels(activeServer).find((channel) => channel.type === "voice" && channel.name === voiceChannel) ?? null
@@ -4959,7 +5003,10 @@ function WorkspaceShell({
             member.username === user.username &&
             member.displayName === user.displayName &&
             member.avatarUrl === user.avatarUrl &&
+            member.bannerUrl === user.bannerUrl &&
+            member.bio === user.bio &&
             member.presence === user.presence &&
+            member.starBalance === clampStarBalance(user.starBalance) &&
             member.accountCreatedAt === user.createdAt
           ) {
             return member;
@@ -4972,7 +5019,10 @@ function WorkspaceShell({
             username: user.username,
             displayName: user.displayName,
             avatarUrl: user.avatarUrl,
+            bannerUrl: user.bannerUrl,
+            bio: user.bio,
             presence: user.presence,
+            starBalance: clampStarBalance(user.starBalance),
             accountCreatedAt: user.createdAt
           };
         });
@@ -5013,7 +5063,7 @@ function WorkspaceShell({
         ])
       )
     );
-  }, [user.avatarUrl, user.createdAt, user.displayName, user.id, user.presence, user.username]);
+  }, [user.avatarUrl, user.bannerUrl, user.bio, user.createdAt, user.displayName, user.id, user.presence, user.starBalance, user.username]);
 
   useEffect(() => {
     const interval = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -5329,8 +5379,12 @@ function WorkspaceShell({
         });
         replaceVoiceStatesForServer(serverId, voiceResult.voiceStates);
         setOnlineSyncStatus("idle");
-      } catch {
+      } catch (caught) {
         if (!cancelled) {
+          if (caught instanceof ApiError && caught.status === 404) {
+            removeServerFromWorkspace(serverId, "Esse servidor foi excluido e nao esta mais disponivel.");
+            return;
+          }
           setOnlineSyncStatus("error");
         }
       }
@@ -5372,7 +5426,7 @@ function WorkspaceShell({
     }
 
     void sendVoiceHeartbeat();
-    const interval = window.setInterval(() => void sendVoiceHeartbeat(), 5000);
+    const interval = window.setInterval(() => void sendVoiceHeartbeat(), 2500);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -5480,7 +5534,29 @@ function WorkspaceShell({
     setStarSupportNotice(null);
   }
 
-  function addStarsToServer(serverId: string) {
+  async function addDeveloperStarBalance() {
+    if (!isDeveloperUser(user)) {
+      return;
+    }
+
+    const amount = Math.min(Math.max(Math.floor(starGrantAmount) || 1, 1), maxUserStarBalance);
+    if (onlineMode && api) {
+      try {
+        const result = await api.addStarBalance({ amount });
+        onUserChange(mergeUserWithLocalProfileImages(result.user));
+        setStarSupportNotice(`${amount.toLocaleString("pt-BR")} estrela${amount === 1 ? "" : "s"} adicionada${amount === 1 ? "" : "s"} ao seu saldo.`);
+      } catch {
+        setStarSupportNotice("Nao consegui adicionar saldo developer pela API agora.");
+      }
+      return;
+    }
+
+    const nextBalance = Math.min(maxUserStarBalance, starSupportBalance + amount);
+    onUserChange({ ...user, starBalance: nextBalance });
+    setStarSupportNotice(`${amount.toLocaleString("pt-BR")} estrela${amount === 1 ? "" : "s"} adicionada${amount === 1 ? "" : "s"} ao saldo local.`);
+  }
+
+  async function addStarsToServer(serverId: string) {
     const targetServer = servers.find((server) => server.id === serverId);
     if (!targetServer) {
       setStarSupportNotice("Esse servidor nao esta disponivel nesta conta.");
@@ -5495,7 +5571,20 @@ function WorkspaceShell({
 
     const amount = Math.min(Math.max(Math.floor(starSupportAmount) || 1, 1), 25);
     if (starSupportBalance < amount) {
-      setStarSupportNotice("Saldo de estrelas da conta ainda precisa ser conectado antes de liberar apoio real para usuarios.");
+      setStarSupportNotice("Saldo de estrelas insuficiente para apoiar esse servidor.");
+      return;
+    }
+
+    if (onlineMode && api) {
+      try {
+        const result = await api.addStarsToServer(serverId, { amount });
+        applyOnlineServer(result.server);
+        onUserChange(mergeUserWithLocalProfileImages(result.user));
+        setStarSupportAmount(1);
+        setStarSupportNotice(`${result.starsSpent} estrela${result.starsSpent === 1 ? "" : "s"} adicionada${result.starsSpent === 1 ? "" : "s"} ao servidor ${targetServer.name}.`);
+      } catch {
+        setStarSupportNotice("Nao consegui apoiar esse servidor pela API agora.");
+      }
       return;
     }
 
@@ -5543,6 +5632,7 @@ function WorkspaceShell({
       ]);
     }
 
+    onUserChange({ ...user, starBalance: Math.max(0, starSupportBalance - amount) });
     setStarSupportAmount(1);
     setStarSupportNotice(`${amount} estrela${amount === 1 ? "" : "s"} adicionada${amount === 1 ? "" : "s"} ao servidor ${targetServer.name}.`);
   }
@@ -5618,6 +5708,12 @@ function WorkspaceShell({
     }
 
     setServerSettingsOpen(false);
+    setChannelSettingsTarget(null);
+    setChannelDialogOpen(false);
+    setCategoryDialogOpen(false);
+    setInviteFriendPicker(null);
+    setDraggedCategoryName(null);
+    setDraggedChannel(null);
     setServerMenuOpen(false);
     setOnlineSyncStatus("idle");
     setServerNotice(notice);
@@ -7230,6 +7326,7 @@ function WorkspaceShell({
       bio: user.bio,
       customStatus: user.customStatus,
       presence: user.presence,
+      starBalance: clampStarBalance(user.starBalance),
       accountCreatedAt: user.createdAt,
       serverJoinedAt: activeServerMember?.joinedAt ?? null,
       isOwnProfile: true,
@@ -7250,6 +7347,7 @@ function WorkspaceShell({
       bio: contact.bio,
       customStatus: contact.customStatus,
       presence: getPublicPresence(contact.status),
+      starBalance: clampStarBalance(contact.starBalance),
       accountCreatedAt: contact.createdAt ?? null,
       serverJoinedAt: null,
       isOwnProfile: false,
@@ -7257,6 +7355,34 @@ function WorkspaceShell({
       canMessage: contact.isFriend || !contact.blocksNonFriendMessages,
       mutualFriends: contact.isFriend ? 1 : 0,
       mutualServers: 0
+    };
+  }
+
+  function getDisplayMember(member: ServerMemberDefinition): ServerMemberDefinition {
+    const isOwnMember = member.id === user.id || member.username === user.username;
+    if (isOwnMember) {
+      return {
+        ...member,
+        username: user.username,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        bannerUrl: user.bannerUrl,
+        bio: user.bio,
+        presence: user.presence,
+        starBalance: clampStarBalance(user.starBalance),
+        accountCreatedAt: user.createdAt
+      };
+    }
+
+    const voiceState = activeServerVoiceStates.find((state) => state.userId === member.id || state.username === member.username);
+    const directContact = directContacts.find((contact) => contact.id === member.id || contact.username === member.username);
+    return {
+      ...member,
+      displayName: voiceState?.displayName ?? directContact?.displayName ?? member.displayName,
+      avatarUrl: sanitizeImageSource(voiceState?.avatarUrl) ?? sanitizeImageSource(directContact?.avatarUrl) ?? member.avatarUrl,
+      bannerUrl: sanitizeImageSource(directContact?.bannerUrl) ?? member.bannerUrl ?? null,
+      bio: directContact?.bio ?? member.bio ?? null,
+      starBalance: clampStarBalance(member.starBalance ?? directContact?.starBalance)
     };
   }
 
@@ -7275,6 +7401,10 @@ function WorkspaceShell({
       const card = getDirectProfileCard(directContact);
       return {
         ...card,
+        avatarUrl: member.avatarUrl ?? card.avatarUrl,
+        bannerUrl: member.bannerUrl ?? card.bannerUrl,
+        bio: member.bio ?? card.bio,
+        starBalance: clampStarBalance(member.starBalance ?? card.starBalance),
         serverJoinedAt: member.joinedAt,
         isOwnProfile: false
       };
@@ -7288,6 +7418,7 @@ function WorkspaceShell({
       bannerUrl: member.bannerUrl ?? null,
       bio: member.bio ?? null,
       presence: getPublicPresence(member.presence),
+      starBalance: clampStarBalance(member.starBalance),
       accountCreatedAt: member.accountCreatedAt ?? member.joinedAt,
       serverJoinedAt: member.joinedAt,
       isOwnProfile: false,
@@ -7334,7 +7465,7 @@ function WorkspaceShell({
     const member = activeServer?.members.find((item) => item.id === state.userId || item.username === state.username);
     if (member) {
       return {
-        ...getMemberProfileCard(member),
+        ...getMemberProfileCard(getDisplayMember(member)),
         voiceStatus: {
           channelName: state.channelName,
           elapsedLabel: formatElapsedDuration(Date.now() - Date.parse(state.joinedAt)),
@@ -7349,6 +7480,7 @@ function WorkspaceShell({
       displayName: state.displayName,
       avatarUrl: state.avatarUrl,
       presence: "ONLINE",
+      starBalance: state.userId === user.id ? clampStarBalance(user.starBalance) : 0,
       accountCreatedAt: null,
       serverJoinedAt: state.joinedAt,
       isOwnProfile: state.userId === user.id,
@@ -7663,6 +7795,7 @@ function WorkspaceShell({
         bio: profileCardUser.id === user.id ? user.bio : profileCardUser.bio,
         customStatus: profileCardUser.id === user.id ? user.customStatus : profileCardUser.customStatus,
         presence: profileCardUser.id === user.id ? user.presence : profileCardUser.presence,
+        starBalance: profileCardUser.id === user.id ? clampStarBalance(user.starBalance) : clampStarBalance(profileCardUser.starBalance),
         accountCreatedAt: profileCardUser.id === user.id ? user.createdAt : profileCardUser.accountCreatedAt,
         voiceStatus: profileCardUser.id === user.id ? ownVoiceStatus : profileCardUser.voiceStatus,
         steamActivity: profileCardUser.id === user.id ? currentActivity ?? undefined : profileCardUser.steamActivity
@@ -7773,7 +7906,7 @@ function WorkspaceShell({
           <div>
             <span>Saldo da conta</span>
             <strong>{starSupportBalance.toLocaleString("pt-BR")} estrelas</strong>
-            {!isDeveloperUser(user) ? <small>Saldo real sera conectado ao sistema de compras.</small> : <small>Saldo de teste autorizado.</small>}
+            {!isDeveloperUser(user) ? <small>Saldo disponivel para apoiar servidores.</small> : <small>Saldo developer autorizado para testes.</small>}
           </div>
           <label>
             Quantidade
@@ -7785,6 +7918,24 @@ function WorkspaceShell({
               ))}
             </select>
           </label>
+          {isDeveloperUser(user) ? (
+            <label className="star-support-grant">
+              Adicionar saldo developer
+              <span>
+                <input
+                  type="number"
+                  min={1}
+                  max={maxUserStarBalance}
+                  step={1}
+                  value={starGrantAmount}
+                  onChange={(event) => setStarGrantAmount(Math.min(maxUserStarBalance, Math.max(1, Number(event.target.value) || 1)))}
+                />
+                <button type="button" title="Adicionar estrelas ao meu saldo" onClick={() => void addDeveloperStarBalance()}>
+                  <Plus size={16} />
+                </button>
+              </span>
+            </label>
+          ) : null}
         </section>
 
         {starSupportNotice ? <p className="settings-notice">{starSupportNotice}</p> : null}
@@ -7818,11 +7969,11 @@ function WorkspaceShell({
                       Abrir servidor
                       <ChevronRight size={15} />
                     </button>
-                    <Button variant="primary" type="button" disabled={!canSupport} onClick={() => addStarsToServer(server.id)}>
+                    <Button variant="primary" type="button" disabled={!canSupport} onClick={() => void addStarsToServer(server.id)}>
                       Adicionar estrelas ao servidor
                     </Button>
                   </div>
-                  {!canSupport ? <small className="star-support-locked">Saldo indisponivel para apoio real nesta versao.</small> : null}
+                  {!canSupport ? <small className="star-support-locked">Saldo insuficiente para essa quantidade.</small> : null}
                 </article>
               );
             })
@@ -8390,8 +8541,11 @@ function WorkspaceShell({
                               {(onlineMode ? voiceParticipants : []).map((state) => {
                                 const liveVoiceMember = activeServer.members.find((member) => member.id === state.userId || member.username === state.username);
                                 const voiceListUser = liveVoiceMember
-                                  ? { displayName: liveVoiceMember.displayName, avatarUrl: liveVoiceMember.avatarUrl }
-                                  : { displayName: state.displayName, avatarUrl: state.avatarUrl };
+                                  ? getDisplayMember(liveVoiceMember)
+                                  : {
+                                      displayName: state.userId === user.id ? user.displayName : state.displayName,
+                                      avatarUrl: state.userId === user.id ? user.avatarUrl : state.avatarUrl
+                                    };
                                 return (
                                   <button className="voice-member-row" key={`${state.serverId}-${state.userId}`} type="button" onClick={() => setProfileCardUser(getVoiceProfileCard(state))}>
                                     <span
@@ -9135,19 +9289,20 @@ function WorkspaceShell({
                     {group.label}
                   </h2>
                   {group.members.map((member) => {
-                    const memberPresence = getPublicPresence(member.presence);
+                    const visibleMember = getDisplayMember(member);
+                    const memberPresence = getPublicPresence(visibleMember.presence);
                     return (
-                      <button className="member-row rich-member-row" key={member.id} type="button" onClick={() => setProfileCardUser(getMemberProfileCard(member))}>
+                      <button className="member-row rich-member-row" key={member.id} type="button" onClick={() => setProfileCardUser(getMemberProfileCard(visibleMember))}>
                         <span className="member-avatar-wrap">
-                          <AvatarBadge user={member} className="member-avatar" />
+                          <AvatarBadge user={visibleMember} className="member-avatar" />
                           <span className={`member-presence presence ${memberPresence.toLowerCase()}`} />
                         </span>
                         <div>
                           <strong className="member-name-line" style={group.color ? { color: group.color } : undefined}>
-                            {member.displayName}
-                            {member.isBot ? <span className="bot-badge">APP</span> : null}
+                            {visibleMember.displayName}
+                            {visibleMember.isBot ? <span className="bot-badge">APP</span> : null}
                           </strong>
-                          {member.id === user.id && currentActivity ? (
+                          {visibleMember.id === user.id && currentActivity ? (
                             <small className="member-game-line">
                               <Gamepad2 size={12} />
                               {currentActivity.gameName}
@@ -9398,7 +9553,7 @@ function AvatarBadge({
   }, [source]);
 
   if (source && !failed) {
-    return <img className={className} src={source} alt="" onError={() => setFailed(true)} />;
+    return <img className={className} src={source} alt="" decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
   }
 
   return <span className={className}>{getInitials(user.displayName)}</span>;
@@ -10605,7 +10760,10 @@ function createServerMember(user: AuthUser, extraRoleIds: string[] = []): Server
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
+    bannerUrl: user.bannerUrl,
+    bio: user.bio,
     presence: user.presence,
+    starBalance: clampStarBalance(user.starBalance),
     accountCreatedAt: user.createdAt,
     joinedAt: new Date().toISOString(),
     roleIds: Array.from(new Set(["everyone", ...extraRoleIds]))
@@ -10738,6 +10896,7 @@ function ProfileCardDialog({
           presence: profile.presence,
           emailVerifiedAt: null,
           blockNonFriendDirectMessages: false,
+          starBalance: clampStarBalance(profile.starBalance),
           twoFactorEnabled: false,
           createdAt: profile.accountCreatedAt ?? new Date().toISOString()
         }
@@ -10815,10 +10974,15 @@ function ProfileCardDialog({
           <div className="profile-card-status">
             <span className={`presence ${profile.presence.toLowerCase()}`} />
             <span>{getPresenceLabel(profile.presence)}</span>
-            {profile.customStatus ? <span>{profile.customStatus}</span> : null}
           </div>
 
           {profile.bio ? <p className="profile-card-bio">{profile.bio}</p> : null}
+
+          <div className="profile-star-balance">
+            <Sparkles size={15} />
+            <span>Saldo de estrelas atuais</span>
+            <strong>{clampStarBalance(profile.starBalance).toLocaleString("pt-BR")}</strong>
+          </div>
 
           {accountCreatedDate || serverJoinedDate ? (
             <div className="profile-card-public-dates">

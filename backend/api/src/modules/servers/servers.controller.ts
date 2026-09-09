@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
 import type { AuthenticatedRequest } from "../../common/auth/authenticated-request";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { AddServerStarsDto } from "./dto/add-server-stars.dto";
 import { BanMemberDto } from "./dto/ban-member.dto";
 import { CreateInviteDto } from "./dto/create-invite.dto";
 import { CreateServerDto } from "./dto/create-server.dto";
@@ -62,6 +63,11 @@ export class ServersController {
   @Delete(":serverId")
   deleteServer(@Param("serverId") serverId: string, @Body() dto: DeleteServerDto, @Req() request: AuthenticatedRequest) {
     return this.servers.deleteServer(request.user.id, serverId, dto.currentPassword);
+  }
+
+  @Post(":serverId/stars")
+  addStars(@Param("serverId") serverId: string, @Body() dto: AddServerStarsDto, @Req() request: AuthenticatedRequest) {
+    return this.servers.addStarsToServer(request.user.id, serverId, dto.amount);
   }
 
   @Post(":serverId/invites")

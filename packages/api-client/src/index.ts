@@ -1,4 +1,7 @@
 import type {
+  AddServerStarsInput,
+  AddServerStarsResponse,
+  AddStarBalanceInput,
   AuthResponse,
   AuthUser,
   BanServerMemberInput,
@@ -50,6 +53,7 @@ import type {
   SendDirectMessageInput,
   ServerMessageResponse,
   ServerMessagesResponse,
+  StarBalanceResponse,
   StartDirectConversationInput,
   TimeoutServerMemberInput,
   TwoFactorSetupInput,
@@ -82,6 +86,7 @@ export interface TempestLightApiClient {
   confirmPasswordReset(input: PasswordResetConfirmInput): Promise<PasswordResetConfirmResponse>;
   me(): Promise<AuthUser>;
   updateMe(input: UpdateProfileInput): Promise<AuthUser>;
+  addStarBalance(input: AddStarBalanceInput): Promise<StarBalanceResponse>;
   changeEmail(input: ChangeEmailInput): Promise<AuthUser>;
   changePassword(input: ChangePasswordInput): Promise<{ ok: true }>;
   deleteAccount(input: DeleteAccountInput): Promise<{ ok: true }>;
@@ -116,6 +121,7 @@ export interface TempestLightApiClient {
   listServerMessages(serverId: string, channelName: string, after?: string): Promise<ServerMessagesResponse>;
   sendServerMessage(serverId: string, input: SendServerMessageInput): Promise<ServerMessageResponse>;
   deleteServerMessage(serverId: string, messageId: string): Promise<DeleteServerMessageResponse>;
+  addStarsToServer(serverId: string, input: AddServerStarsInput): Promise<AddServerStarsResponse>;
   listServerVoiceStates(serverId: string): Promise<OnlineVoiceStatesResponse>;
   updateServerVoiceState(serverId: string, input: OnlineVoiceStateInput): Promise<OnlineVoiceStateResponse>;
   leaveServerVoice(serverId: string): Promise<{ ok: true }>;
@@ -219,6 +225,11 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
     updateMe: (input) =>
       request<AuthUser>("/auth/me", {
         method: "PATCH",
+        body: JSON.stringify(input)
+      }),
+    addStarBalance: (input) =>
+      request<StarBalanceResponse>("/auth/me/stars", {
+        method: "POST",
         body: JSON.stringify(input)
       }),
     changeEmail: (input) =>
@@ -359,6 +370,11 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
     deleteServerMessage: (serverId, messageId) =>
       request<DeleteServerMessageResponse>(`/servers/${encodeURIComponent(serverId)}/messages/${encodeURIComponent(messageId)}`, {
         method: "DELETE"
+      }),
+    addStarsToServer: (serverId, input) =>
+      request<AddServerStarsResponse>(`/servers/${encodeURIComponent(serverId)}/stars`, {
+        method: "POST",
+        body: JSON.stringify(input)
       }),
     listServerVoiceStates: (serverId) => request<OnlineVoiceStatesResponse>(`/servers/${encodeURIComponent(serverId)}/voice`),
     updateServerVoiceState: (serverId, input) =>

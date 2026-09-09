@@ -12,6 +12,7 @@ export interface AuthenticatedPrincipal {
   presence: "ONLINE" | "IDLE" | "DND" | "INVISIBLE" | "OFFLINE";
   emailVerifiedAt: string | null;
   blockNonFriendDirectMessages: boolean;
+  starBalance: number;
   createdAt: string;
   sessionId: string;
 }

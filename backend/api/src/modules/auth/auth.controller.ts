@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Patch, Post, Query, Req, Res, UseGuards 
 import type { Request, Response } from "express";
 import type { AuthenticatedRequest } from "../../common/auth/authenticated-request";
 import { AuthService } from "./auth.service";
+import { AddStarBalanceDto } from "./dto/add-star-balance.dto";
 import { ChangeEmailDto } from "./dto/change-email.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import { DeleteAccountDto } from "./dto/delete-account.dto";
@@ -92,6 +93,12 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   updateMe(@Body() dto: UpdateProfileDto, @Req() request: AuthenticatedRequest) {
     return this.auth.updateProfile(request.user.id, dto);
+  }
+
+  @Post("me/stars")
+  @UseGuards(JwtAuthGuard)
+  addStars(@Body() dto: AddStarBalanceDto, @Req() request: AuthenticatedRequest) {
+    return this.auth.addDeveloperStars(request.user.id, dto.amount);
   }
 
   @Patch("me/email")
