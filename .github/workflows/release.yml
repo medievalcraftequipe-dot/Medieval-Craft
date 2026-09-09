@@ -85,6 +85,12 @@ jobs:
           gh release upload $tag "INSTALADOR/JSON_PARA_GITHUB/tempest_light_update.json" --clobber
           gh release upload $tag "INSTALADOR/JSON_PARA_GITHUB/tempest_light_download_info.json" --clobber
           gh release upload $tag "INSTALADOR/JSON_PARA_GITHUB/tempest_light_installer_package.json" --clobber
+          $installerPath = "apps/desktop/release/Tempest Light Setup $version.exe"
+          if (Test-Path $installerPath) {
+            gh release upload $tag $installerPath --clobber
+          } else {
+            Write-Error "Instalador nao encontrado: $installerPath"
+          }
           Get-ChildItem "INSTALADOR/JSON_PARA_GITHUB/tempest_light_installer_package_part*.json" | ForEach-Object {
             gh release upload $tag $_.FullName --clobber
           }

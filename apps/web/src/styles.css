@@ -2505,6 +2505,10 @@ img.profile-avatar {
   height: 42px;
 }
 
+.message > div {
+  min-width: 0;
+}
+
 .message header {
   display: flex;
   align-items: baseline;
@@ -2521,6 +2525,33 @@ img.profile-avatar {
 .message time {
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+.message-delete-button {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  margin-left: auto;
+  opacity: 0;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease,
+    opacity 0.16s ease;
+}
+
+.message:hover .message-delete-button,
+.message-delete-button:focus-visible {
+  opacity: 1;
+}
+
+.message-delete-button:hover {
+  background: color-mix(in srgb, var(--danger), transparent 84%);
+  color: var(--danger);
 }
 
 .message p {

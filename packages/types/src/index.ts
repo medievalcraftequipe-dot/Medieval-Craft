@@ -336,6 +336,13 @@ export interface ServerMessageResponse {
   message: OnlineServerMessage;
 }
 
+export interface DeleteServerMessageResponse {
+  ok: true;
+  messageId: string;
+  serverId: string;
+  channelName: string;
+}
+
 export interface CreateServerInviteInput {
   duration?: "24h" | "2d" | "5d" | "30d" | "1m" | "never";
   maxUses?: number | null;

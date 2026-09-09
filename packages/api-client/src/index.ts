@@ -4,6 +4,7 @@ import type {
   BanServerMemberInput,
   ChangeEmailInput,
   ChangePasswordInput,
+  DeleteServerMessageResponse,
   DeleteOnlineServerResponse,
   DeleteAccountInput,
   DeleteServerInput,
@@ -114,6 +115,7 @@ export interface TempestLightApiClient {
   removeServerMemberTimeout(serverId: string, userId: string): Promise<OnlineServerModerationResponse>;
   listServerMessages(serverId: string, channelName: string, after?: string): Promise<ServerMessagesResponse>;
   sendServerMessage(serverId: string, input: SendServerMessageInput): Promise<ServerMessageResponse>;
+  deleteServerMessage(serverId: string, messageId: string): Promise<DeleteServerMessageResponse>;
   listServerVoiceStates(serverId: string): Promise<OnlineVoiceStatesResponse>;
   updateServerVoiceState(serverId: string, input: OnlineVoiceStateInput): Promise<OnlineVoiceStateResponse>;
   leaveServerVoice(serverId: string): Promise<{ ok: true }>;
@@ -353,6 +355,10 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
       request<ServerMessageResponse>(`/servers/${encodeURIComponent(serverId)}/messages`, {
         method: "POST",
         body: JSON.stringify(input)
+      }),
+    deleteServerMessage: (serverId, messageId) =>
+      request<DeleteServerMessageResponse>(`/servers/${encodeURIComponent(serverId)}/messages/${encodeURIComponent(messageId)}`, {
+        method: "DELETE"
       }),
     listServerVoiceStates: (serverId) => request<OnlineVoiceStatesResponse>(`/servers/${encodeURIComponent(serverId)}/voice`),
     updateServerVoiceState: (serverId, input) =>

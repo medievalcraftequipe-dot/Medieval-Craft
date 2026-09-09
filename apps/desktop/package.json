@@ -1,6 +1,6 @@
 {
   "name": "@tempest-light/desktop",
-  "version": "0.1.38",
+  "version": "0.1.41",
   "private": true,
   "description": "Tempest Light desktop launcher and client.",
   "author": "Tempest Light",

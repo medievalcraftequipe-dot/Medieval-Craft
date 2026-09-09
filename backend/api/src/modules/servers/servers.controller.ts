@@ -119,6 +119,11 @@ export class ServersController {
     return this.servers.sendMessage(request.user.id, serverId, dto.channelName, dto.content, dto.mentions);
   }
 
+  @Delete(":serverId/messages/:messageId")
+  deleteMessage(@Param("serverId") serverId: string, @Param("messageId") messageId: string, @Req() request: AuthenticatedRequest) {
+    return this.servers.deleteMessage(request.user.id, serverId, messageId);
+  }
+
   @Get(":serverId/voice")
   listVoiceStates(@Param("serverId") serverId: string, @Req() request: AuthenticatedRequest) {
     return this.servers.listVoiceStates(request.user.id, serverId);

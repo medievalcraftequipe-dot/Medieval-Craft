@@ -613,6 +613,49 @@ export class ServersService {
     return { message: this.presentServerMessage(message) };
   }
 
+  async deleteMessage(userId: string, serverId: string, messageId: string) {
+    await this.ensureMember(serverId, userId);
+
+    const cleanMessageId = (messageId ?? "").trim();
+    if (!cleanMessageId) {
+      throw new BadRequestException("Mensagem obrigatoria.");
+    }
+
+    const message = await this.prisma.serverChannelMessage.findUnique({
+      where: { id: cleanMessageId },
+      include: {
+        server: {
+          select: {
+            id: true,
+            ownerId: true,
+            clientState: true
+          }
+        }
+      }
+    });
+
+    if (!message || message.serverId !== serverId) {
+      throw new NotFoundException("Mensagem nao encontrada.");
+    }
+
+    if (message.authorId !== userId) {
+      const moderator = await this.getUser(userId);
+      const canDeleteOthers = this.canModerateServer(message.server, moderator, ["administrator", "manage_messages", "manage_server"]);
+      if (!canDeleteOthers) {
+        throw new ForbiddenException("Voce so pode excluir suas proprias mensagens.");
+      }
+    }
+
+    await this.prisma.serverChannelMessage.delete({ where: { id: message.id } });
+
+    return {
+      ok: true as const,
+      messageId: message.id,
+      serverId: message.serverId,
+      channelName: message.channelName
+    };
+  }
+
   async upsertVoiceState(userId: string, serverId: string, channelName: string, muted = false, speaking = false) {
     await this.ensureMember(serverId, userId);
     await this.pruneStaleVoiceSessions();

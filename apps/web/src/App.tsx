@@ -4597,6 +4597,7 @@ function WorkspaceShell({
   const canCreateInvite = memberHasPermission(activeServer, activeServerMember, "create_invite", user.id);
   const canCreateEvents = memberHasPermission(activeServer, activeServerMember, "create_events", user.id);
   const canSendServerMessages = memberHasPermission(activeServer, activeServerMember, "send_messages", user.id);
+  const canManageMessages = memberHasPermission(activeServer, activeServerMember, "manage_messages", user.id);
   const canAttachFiles = memberHasPermission(activeServer, activeServerMember, "attach_files", user.id);
   const canConnectVoice = memberHasPermission(activeServer, activeServerMember, "connect", user.id);
   const canSetVoiceStatus = memberHasPermission(activeServer, activeServerMember, "set_voice_channel_status", user.id);
@@ -5663,6 +5664,73 @@ function WorkspaceShell({
 
   function getServerChannelMessages(serverId: string, channelName: string) {
     return messages.filter((message) => message.serverId === serverId && message.channelName === channelName);
+  }
+
+  function isOwnServerMessage(message: LocalMessage) {
+    if (message.authorId) {
+      return message.authorId === user.id;
+    }
+
+    if (message.authorUsername) {
+      return message.authorUsername === user.username;
+    }
+
+    return message.author === user.displayName;
+  }
+
+  function canDeleteServerMessage(message: LocalMessage) {
+    if (!activeServer) {
+      return false;
+    }
+
+    return activeServer.ownerId === user.id || canManageMessages || isOwnServerMessage(message);
+  }
+
+  function removeServerMessageFromState(targetMessage: LocalMessage) {
+    setMessages((current) =>
+      current.filter((message) => {
+        if (targetMessage.id && message.id) {
+          return message.id !== targetMessage.id;
+        }
+
+        return !(
+          message.serverId === targetMessage.serverId &&
+          message.channelName === targetMessage.channelName &&
+          message.authorId === targetMessage.authorId &&
+          message.authorUsername === targetMessage.authorUsername &&
+          message.author === targetMessage.author &&
+          message.time === targetMessage.time &&
+          message.createdAt === targetMessage.createdAt &&
+          message.text === targetMessage.text
+        );
+      })
+    );
+  }
+
+  async function deleteServerChatMessage(message: LocalMessage) {
+    if (!activeServer || !canDeleteServerMessage(message)) {
+      setServerNotice("Voce so pode excluir suas proprias mensagens.");
+      return;
+    }
+
+    if (!window.confirm("Excluir esta mensagem?")) {
+      return;
+    }
+
+    if (onlineMode && api && message.id) {
+      try {
+        await api.deleteServerMessage(activeServer.id, message.id);
+        removeServerMessageFromState(message);
+        setOnlineSyncStatus("idle");
+      } catch (error) {
+        const fallback = "Nao consegui excluir essa mensagem pela API online agora.";
+        setServerNotice(error instanceof ApiError ? error.message : fallback);
+        setOnlineSyncStatus("error");
+      }
+      return;
+    }
+
+    removeServerMessageFromState(message);
   }
 
   function markServerChannelRead(serverId: string, channelName: string) {
@@ -8846,10 +8914,11 @@ function WorkspaceShell({
               ) : null}
               {activeServerMessages.map((message, index) => {
                 const authorProfile = getMessageAuthorProfile(message);
+                const messageCanBeDeleted = canDeleteServerMessage(message);
                 return (
                   <article
                     className={["message", messageMentionsUser(message, user) ? "mentioned" : ""].filter(Boolean).join(" ")}
-                    key={`${activeServer.id}-${message.author}-${message.time}-${index}`}
+                    key={message.id ?? `${activeServer.id}-${message.author}-${message.time}-${index}`}
                   >
                     <AvatarBadge user={authorProfile} className="message-avatar" />
                     <div>
@@ -8858,8 +8927,19 @@ function WorkspaceShell({
                           {authorProfile.displayName}
                           {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
                         </strong>
-                          <time>{message.time}</time>
-                        </header>
+                        <time>{message.time}</time>
+                        {messageCanBeDeleted ? (
+                          <button
+                            className="message-delete-button"
+                            type="button"
+                            title="Excluir mensagem"
+                            aria-label="Excluir mensagem"
+                            onClick={() => void deleteServerChatMessage(message)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        ) : null}
+                      </header>
                       <ChatMessageBody message={message} renderText={(text) => renderServerMessageText(message, text)} onOpenExternalLink={requestOpenExternalLink} />
                     </div>
                   </article>
