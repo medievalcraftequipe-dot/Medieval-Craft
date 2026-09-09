@@ -54,6 +54,11 @@ export class ServersController {
     return this.servers.updateServerState(request.user.id, serverId, dto.server);
   }
 
+  @Delete(":serverId/members/me")
+  leaveServer(@Param("serverId") serverId: string, @Req() request: AuthenticatedRequest) {
+    return this.servers.leaveServer(request.user.id, serverId);
+  }
+
   @Delete(":serverId")
   deleteServer(@Param("serverId") serverId: string, @Body() dto: DeleteServerDto, @Req() request: AuthenticatedRequest) {
     return this.servers.deleteServer(request.user.id, serverId, dto.currentPassword);

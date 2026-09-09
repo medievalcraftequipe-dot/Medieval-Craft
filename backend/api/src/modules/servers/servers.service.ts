@@ -175,6 +175,46 @@ export class ServersService {
     return { ok: true as const, serverId };
   }
 
+  async leaveServer(userId: string, serverId: string) {
+    const server = await this.prisma.server.findUnique({
+      where: { id: serverId },
+      select: {
+        id: true,
+        ownerId: true,
+        members: {
+          where: { userId },
+          select: { id: true }
+        }
+      }
+    });
+
+    if (!server) {
+      throw new NotFoundException("Servidor nao encontrado.");
+    }
+
+    if (!server.members.length) {
+      throw new ForbiddenException("Voce nao participa deste servidor.");
+    }
+
+    if (server.ownerId === userId) {
+      throw new ForbiddenException("O dono precisa transferir ou excluir o servidor antes de sair.");
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.serverMember.deleteMany({ where: { serverId, userId } }),
+      this.prisma.serverVoiceSession.deleteMany({ where: { serverId, userId } }),
+      this.prisma.voiceSignal.deleteMany({
+        where: {
+          serverId,
+          OR: [{ fromUserId: userId }, { toUserId: userId }]
+        }
+      })
+    ]);
+
+    await this.refreshPresentedServerState(serverId);
+    return { ok: true as const, serverId };
+  }
+
   async joinServerByInvite(userId: string, codeInput: string) {
     const code = this.extractInviteCode(codeInput);
     if (!code) {

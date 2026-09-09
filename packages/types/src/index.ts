@@ -285,6 +285,11 @@ export interface DeleteOnlineServerResponse {
   serverId: string;
 }
 
+export interface LeaveOnlineServerResponse {
+  ok: true;
+  serverId: string;
+}
+
 export interface BanServerMemberInput {
   username: string;
   reason?: string;

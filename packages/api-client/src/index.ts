@@ -20,6 +20,7 @@ import type {
   CreateOnlineServerInput,
   CreateServerInviteInput,
   JoinServerInput,
+  LeaveOnlineServerResponse,
   LoginInput,
   OnlineDiscoverServersResponse,
   OnlineServerBundle,
@@ -103,6 +104,7 @@ export interface TempestLightApiClient {
   deleteServer(serverId: string, input: DeleteServerInput): Promise<DeleteOnlineServerResponse>;
   joinServer(input: JoinServerInput): Promise<OnlineServerResponse>;
   joinPublicServer(serverId: string): Promise<OnlineServerResponse>;
+  leaveServer(serverId: string): Promise<LeaveOnlineServerResponse>;
   createServerInvite(serverId: string, input: CreateServerInviteInput): Promise<OnlineServerInviteResponse>;
   updateServerInvite(serverId: string, inviteId: string, input: { active?: boolean }): Promise<OnlineServerInviteResponse>;
   deleteServerInvite(serverId: string, inviteId: string): Promise<{ ok: true; server: unknown }>;
@@ -303,6 +305,10 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
     joinPublicServer: (serverId) =>
       request<OnlineServerResponse>(`/servers/${encodeURIComponent(serverId)}/join`, {
         method: "POST"
+      }),
+    leaveServer: (serverId) =>
+      request<LeaveOnlineServerResponse>(`/servers/${encodeURIComponent(serverId)}/members/me`, {
+        method: "DELETE"
       }),
     createServerInvite: (serverId, input) =>
       request<OnlineServerInviteResponse>(`/servers/${encodeURIComponent(serverId)}/invites`, {

@@ -146,12 +146,13 @@ const termsOfUseSections = [
 type AuthMode = "login" | "register";
 type ThemeMode = "system" | "dark" | "light";
 type ChannelKind = "text" | "voice";
-type ShellView = "direct" | "server" | "discover";
+type ShellView = "direct" | "server" | "discover" | "stars";
 type ServerPurpose = "friends" | "community";
 type ServerTemplateId = "blank" | "games" | "friends" | "study" | "school";
 type RoleStyle = "solid" | "gradient" | "holographic";
 type DiscordBridgeStatus = "connected" | "pending" | "error";
 type BotCommandModule = "utility" | "music" | "moderation" | "fun" | "economy";
+type BotPlatform = "tempest" | "discord";
 type MessageMentionKind = "member" | "bot" | "role";
 type InAppUpdateState = "available" | "checking" | "installing" | "restarting" | "current" | "error";
 type InviteDurationId = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
@@ -160,6 +161,15 @@ type ChatComposerTarget = "server" | "direct";
 type ServerAccessMode = "invite" | "request" | "discoverable";
 type ScreenShareQualityId = "144p" | "360p" | "720p" | "1080p" | "2k" | "4k" | "8k";
 type ScreenShareCaptureMode = "screen" | "game";
+type ChannelSettingsTab = "overview" | "permissions" | "invites" | "integrations";
+
+interface ChannelSettingsInput {
+  name: string;
+  topic: string | null;
+  isPrivate: boolean;
+  slowModeSeconds: number;
+  userLimit: number | null;
+}
 
 const soundboardMaxSounds = 24;
 const soundboardAudioMaxBytes = 50 * 1024 * 1024;
@@ -195,6 +205,7 @@ const chatImageMaxHeight = 720;
 const profileImageDataUrlMaxBytes = 4 * 1024 * 1024;
 const youtubeHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$/i;
 const trustedMediaHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$|(^|\.)twitch\.tv$/i;
+const giphyHostPattern = /(^|\.)giphy\.com$|(^|\.)media\.giphy\.com$|(^|\.)i\.giphy\.com$/i;
 const dangerousFileExtensionPattern = /\.(?:exe|msi|bat|cmd|ps1|scr|vbs|jar|com|pif|apk|dll|reg|lnk|iso|img|app|dmg)(?:[?#].*)?$/i;
 const imageFileNamePattern = /\.(?:png|jpe?g|gif|webp|avif)$/i;
 const screenShareQualities: Array<{ id: ScreenShareQualityId; label: string; width: number; height: number }> = [
@@ -213,6 +224,11 @@ const voiceAudioConstraints: MediaTrackConstraints = {
   channelCount: { ideal: 1 },
   sampleRate: { ideal: 48000 },
   sampleSize: { ideal: 16 }
+};
+const screenShareAudioConstraints: MediaTrackConstraints = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false
 };
 const defaultVoiceIceServers: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -346,9 +362,11 @@ type PermissionKey =
 interface ChannelDefinition {
   name: string;
   type: ChannelKind;
+  topic?: string | null;
   isPrivate?: boolean;
   special?: CommunityChannelKind;
   isNew?: boolean;
+  slowModeSeconds?: number;
   userLimit?: number | null;
 }
 
@@ -429,11 +447,13 @@ interface ServerMemberDefinition {
 
 interface ServerBotIntegration {
   id: string;
+  platform: BotPlatform;
   username: string;
   displayName: string;
   avatarUrl: string | null;
   bannerUrl: string | null;
   description: string | null;
+  internalToken: string | null;
   tokenPreview: string;
   discordApplicationId: string | null;
   bridgeStatus: DiscordBridgeStatus;
@@ -1626,9 +1646,17 @@ function useOnlineVoiceCall({
     }
 
     const quality = screenShareQualities.find((item) => item.id === qualityId) ?? screenShareQualities[2];
-    const stream = sourceId
-      ? await navigator.mediaDevices.getUserMedia({
-          audio: false,
+    const captureStream = async (withAudio: boolean) => {
+      if (sourceId) {
+        return navigator.mediaDevices.getUserMedia({
+          audio: withAudio
+            ? ({
+                mandatory: {
+                  chromeMediaSource: "desktop",
+                  chromeMediaSourceId: sourceId
+                }
+              } as unknown as MediaTrackConstraints)
+            : false,
           video: {
             mandatory: {
               chromeMediaSource: "desktop",
@@ -1640,19 +1668,39 @@ function useOnlineVoiceCall({
               maxFrameRate: frameRate
             }
           }
-        } as unknown as MediaStreamConstraints)
-      : await navigator.mediaDevices.getDisplayMedia({
-          audio: false,
-          video: (() => {
-            const videoConstraints: MediaTrackConstraints = {
-              width: { ideal: quality.width },
-              height: { ideal: quality.height },
-              frameRate: { ideal: frameRate, max: frameRate }
-            };
-            (videoConstraints as MediaTrackConstraints & { displaySurface?: string }).displaySurface = displaySurface;
-            return videoConstraints;
-          })()
-        });
+        } as unknown as MediaStreamConstraints);
+      }
+
+      return navigator.mediaDevices.getDisplayMedia({
+        audio: withAudio ? screenShareAudioConstraints : false,
+        video: (() => {
+          const videoConstraints: MediaTrackConstraints = {
+            width: { ideal: quality.width },
+            height: { ideal: quality.height },
+            frameRate: { ideal: frameRate, max: frameRate }
+          };
+          (videoConstraints as MediaTrackConstraints & { displaySurface?: string }).displaySurface = displaySurface;
+          return videoConstraints;
+        })()
+      });
+    };
+
+    let stream: MediaStream;
+    try {
+      stream = await captureStream(true);
+    } catch (caught) {
+      const name =
+        typeof DOMException !== "undefined" && caught instanceof DOMException
+          ? caught.name
+          : caught instanceof Error
+            ? caught.name
+            : "";
+      if (!sourceId && (name === "NotAllowedError" || name === "AbortError")) {
+        throw caught;
+      }
+
+      stream = await captureStream(false);
+    }
 
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenStreamRef.current = stream;
@@ -1661,6 +1709,7 @@ function useOnlineVoiceCall({
     });
     setScreenStream(stream);
     closeAllPeers();
+    return stream;
   }
 
   function stopScreenShare() {
@@ -2066,7 +2115,7 @@ function normalizeServerSoundEffect(effect: Partial<ServerSoundEffect>): ServerS
   };
 }
 
-function createDeveloperBoost(user: AuthUser): ServerBoost {
+function createServerBoost(user: AuthUser): ServerBoost {
   const createdAt = new Date();
   const expiresAt = new Date(createdAt.getTime() + 30 * 24 * 60 * 60 * 1000);
 
@@ -2077,6 +2126,10 @@ function createDeveloperBoost(user: AuthUser): ServerBoost {
     createdAt: createdAt.toISOString(),
     expiresAt: expiresAt.toISOString()
   };
+}
+
+function createDeveloperBoost(user: AuthUser): ServerBoost {
+  return createServerBoost(user);
 }
 
 function getActiveBoosts(boosts: ServerBoost[], now = Date.now()) {
@@ -2349,7 +2402,10 @@ function readWorkspaceState(user: AuthUser): SavedWorkspaceState | null {
     const parsed = JSON.parse(stored) as Partial<SavedWorkspaceState>;
     const servers = Array.isArray(parsed.servers) ? parsed.servers.map((server) => normalizeSavedServer(server, user)) : [];
     const activeServerId = parsed.activeServerId && servers.some((server) => server.id === parsed.activeServerId) ? parsed.activeServerId : null;
-    const activeView = parsed.activeView === "server" && !activeServerId ? "direct" : parsed.activeView ?? "direct";
+    const activeView =
+      (parsed.activeView === "server" || parsed.activeView === "stars") && !activeServerId
+        ? "direct"
+        : parsed.activeView ?? "direct";
 
     return {
       activeView,
@@ -2528,7 +2584,8 @@ function normalizeServerMember(member: Partial<ServerMemberDefinition>): ServerM
 
 function normalizeServerBot(bot: Partial<ServerBotIntegration>): ServerBotIntegration {
   const id = String(bot.id || `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  const displayName = String(bot.displayName || bot.username || "Discord Bot").slice(0, 48);
+  const platform: BotPlatform = bot.platform === "tempest" ? "tempest" : "discord";
+  const displayName = String(bot.displayName || bot.username || (platform === "tempest" ? "Bot Tempest" : "Discord Bot")).slice(0, 48);
   const rawPrefix = typeof bot.prefix === "string" && bot.prefix.trim() ? bot.prefix.trim().slice(0, 4) : "!";
   const rawCommandName =
     typeof bot.commandName === "string" && bot.commandName.trim() ? bot.commandName.trim().replace(/^\W+/, "").slice(0, 24) : "ping";
@@ -2538,14 +2595,16 @@ function normalizeServerBot(bot: Partial<ServerBotIntegration>): ServerBotIntegr
       : defaultBotCommandModules;
   return {
     id,
+    platform,
     username: String(bot.username || normalizeTextChannelName(displayName)).slice(0, 32),
     displayName,
     avatarUrl: sanitizeImageSource(bot.avatarUrl),
     bannerUrl: sanitizeImageSource(bot.bannerUrl),
     description: typeof bot.description === "string" && bot.description.trim() ? bot.description.trim().slice(0, 240) : null,
+    internalToken: platform === "tempest" && typeof bot.internalToken === "string" && bot.internalToken.trim() ? bot.internalToken.trim().slice(0, 96) : null,
     tokenPreview: String(bot.tokenPreview || "token mascarado").slice(0, 24),
-    discordApplicationId: typeof bot.discordApplicationId === "string" && bot.discordApplicationId.trim() ? bot.discordApplicationId : null,
-    bridgeStatus: bot.bridgeStatus === "connected" || bot.bridgeStatus === "error" ? bot.bridgeStatus : "pending",
+    discordApplicationId: platform === "discord" && typeof bot.discordApplicationId === "string" && bot.discordApplicationId.trim() ? bot.discordApplicationId : null,
+    bridgeStatus: platform === "tempest" ? "connected" : bot.bridgeStatus === "connected" || bot.bridgeStatus === "error" ? bot.bridgeStatus : "pending",
     runtimeEnabled: bot.runtimeEnabled ?? true,
     prefix: rawPrefix,
     commandName: rawCommandName || "ping",
@@ -2568,7 +2627,7 @@ function createServerBotMember(bot: ServerBotIntegration): ServerMemberDefinitio
     avatarUrl: bot.avatarUrl,
     bannerUrl: bot.bannerUrl,
     bio: bot.description,
-    presence: "OFFLINE",
+    presence: isBotRuntimeOnline(bot) ? "ONLINE" : "OFFLINE",
     accountCreatedAt: bot.addedAt,
     joinedAt: bot.addedAt,
     roleIds: ["everyone"],
@@ -2585,10 +2644,18 @@ function maskBotToken(token: string) {
   return `${cleanToken.slice(0, 6)}...${cleanToken.slice(-4)}`;
 }
 
+function createTempestBotToken() {
+  const randomBytes = new Uint8Array(24);
+  crypto.getRandomValues(randomBytes);
+  const secret = Array.from(randomBytes, (byte) => byte.toString(36).padStart(2, "0")).join("").slice(0, 48);
+  return `tlb_${Date.now().toString(36)}_${secret}`;
+}
+
 function createServerBotFromToken(
   token: string,
   user: AuthUser,
   options?: {
+    platform?: BotPlatform;
     discordApplicationId?: string | null;
     username?: string;
     displayName?: string;
@@ -2604,24 +2671,31 @@ function createServerBotFromToken(
   }
 ) {
   const cleanToken = token.trim();
+  const platform = options?.platform ?? "discord";
   const safeSuffix = cleanToken
     .replace(/[^a-z0-9]/gi, "")
     .slice(-5)
     .toLowerCase() || Math.random().toString(36).slice(2, 7);
   const now = new Date().toISOString();
-  const displayName = options?.displayName?.trim().slice(0, 48) || `Bot migrado ${safeSuffix.toUpperCase()}`;
+  const displayName =
+    options?.displayName?.trim().slice(0, 48) || (platform === "tempest" ? `Bot Tempest ${safeSuffix.toUpperCase()}` : `Bot migrado ${safeSuffix.toUpperCase()}`);
   const username = options?.username?.trim().slice(0, 32) || `bot-${safeSuffix}`;
   const commandName = options?.commandName?.trim().replace(/^\W+/, "").slice(0, 24) || "ping";
   const bot: ServerBotIntegration = {
-    id: options?.discordApplicationId ? `discord-bot-${options.discordApplicationId}` : `bot-${Date.now()}-${safeSuffix}`,
+    id:
+      platform === "discord" && options?.discordApplicationId
+        ? `discord-bot-${options.discordApplicationId}`
+        : `${platform}-bot-${Date.now()}-${safeSuffix}`,
+    platform,
     username,
     displayName,
     avatarUrl: options?.avatarUrl ?? null,
     bannerUrl: options?.bannerUrl ?? null,
     description: options?.description?.trim().slice(0, 240) || null,
-    tokenPreview: maskBotToken(cleanToken),
-    discordApplicationId: options?.discordApplicationId ?? null,
-    bridgeStatus: options?.bridgeStatus ?? "pending",
+    internalToken: platform === "tempest" ? cleanToken : null,
+    tokenPreview: platform === "tempest" ? maskBotToken(cleanToken) : maskBotToken(cleanToken),
+    discordApplicationId: platform === "discord" ? options?.discordApplicationId ?? null : null,
+    bridgeStatus: options?.bridgeStatus ?? (platform === "tempest" ? "connected" : "pending"),
     runtimeEnabled: true,
     prefix: options?.prefix?.trim().slice(0, 4) || "!",
     commandName,
@@ -3019,10 +3093,35 @@ function getYoutubePreviewTitle(link: string) {
 function looksLikeImageLink(link: string) {
   try {
     const url = new URL(link);
-    return /\.(png|jpe?g|gif|webp|avif)(\?.*)?$/i.test(url.pathname + url.search);
+    return /\.(png|jpe?g|gif|webp|avif)(?:[?#].*)?$/i.test(`${url.pathname}${url.search}${url.hash}`);
   } catch {
     return false;
   }
+}
+
+function getAnimatedImagePreviewUrl(link: string) {
+  try {
+    const url = new URL(link);
+    const path = `${url.pathname}${url.search}${url.hash}`;
+    if (/\.gif(?:[?#].*)?$/i.test(path)) {
+      return link;
+    }
+
+    if (!giphyHostPattern.test(url.hostname)) {
+      return null;
+    }
+
+    const parts = url.pathname.split("/").filter(Boolean);
+    const lastPart = parts.at(-1) ?? "";
+    const gifId = lastPart.split("-").at(-1)?.replace(/[^a-z0-9]/gi, "") ?? "";
+    if ((parts.includes("gifs") || parts.includes("stickers")) && gifId.length >= 4) {
+      return `https://media.giphy.com/media/${encodeURIComponent(gifId)}/giphy.gif`;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function isTrustedMediaLink(link: string) {
@@ -3204,12 +3303,18 @@ function normalizeSavedServer(server: Partial<ServerDefinition>, user: AuthUser)
                 .filter((channel) => channel && (channel.type === "text" || channel.type === "voice"))
                 .map((channel) => {
                   const fallbackName = channel.type === "voice" ? "Geral" : "geral";
+                  const special = channel.special === "rules" ? undefined : channel.special;
                   return {
                     name: normalizeServerStructureName(String(channel.name || fallbackName), fallbackName),
                     type: channel.type,
+                    topic: typeof channel.topic === "string" && channel.topic.trim() ? channel.topic.trim().slice(0, 1024) : null,
                     isPrivate: Boolean(channel.isPrivate),
-                    special: channel.special,
+                    ...(special ? { special } : {}),
                     isNew: Boolean(channel.isNew),
+                    slowModeSeconds:
+                      typeof channel.slowModeSeconds === "number" && channel.slowModeSeconds > 0
+                        ? Math.min(Math.floor(channel.slowModeSeconds), 21600)
+                        : 0,
                     userLimit:
                       typeof channel.userLimit === "number" && channel.userLimit > 0
                         ? Math.min(Math.floor(channel.userLimit), 99)
@@ -4429,10 +4534,13 @@ function WorkspaceShell({
   const [pendingServerPurpose, setPendingServerPurpose] = useState<ServerPurpose>("community");
   const [pendingServerTemplateId, setPendingServerTemplateId] = useState<ServerTemplateId>("blank");
   const [serverMenuOpen, setServerMenuOpen] = useState(false);
+  const [inviteFriendPicker, setInviteFriendPicker] = useState<{ inviteLink: string; serverName: string } | null>(null);
   const [draggedCategoryName, setDraggedCategoryName] = useState<string | null>(null);
   const [draggedChannel, setDraggedChannel] = useState<{ groupName: string; channelName: string } | null>(null);
-  const [voiceSettingsTarget, setVoiceSettingsTarget] = useState<{ groupName: string; channelName: string } | null>(null);
+  const [channelSettingsTarget, setChannelSettingsTarget] = useState<{ groupName: string; channelName: string } | null>(null);
   const [serverNotice, setServerNotice] = useState<string | null>(null);
+  const [starSupportNotice, setStarSupportNotice] = useState<string | null>(null);
+  const [starSupportAmount, setStarSupportAmount] = useState(1);
   const [discoverQuery, setDiscoverQuery] = useState("");
   const [inviteCodeDraft, setInviteCodeDraft] = useState("");
   const [messages, setMessages] = useState<LocalMessage[]>(() => savedWorkspaceState?.messages ?? initialMessages);
@@ -4675,7 +4783,7 @@ function WorkspaceShell({
         const member = server.members.find((item) => item.id === user.id || item.username === user.username) ?? null;
         return server.ownerId === user.id || memberHasPermission(server, member, "administrator", user.id);
       }));
-  const specialChannels = activeServer ? getAllServerChannels(activeServer).filter((channel) => channel.special) : [];
+  const specialChannels = activeServer ? getAllServerChannels(activeServer).filter((channel) => channel.special && channel.special !== "rules") : [];
   const activeServerBoosts = activeServer ? getActiveBoosts(activeServer.boosts, nowTick) : [];
   const activeServerBoostLevel = getBoostLevel(activeServerBoosts.length);
   const activeServerNextBoostTarget = getNextBoostTarget(activeServerBoosts.length);
@@ -4700,6 +4808,14 @@ function WorkspaceShell({
   const canUseActiveServerGuide = Boolean(activeServer && activeServer.communityEnabled && activeServerBoostLevel >= SERVER_GUIDE_UNLOCK_LEVEL);
   const activeStarProgressGradient =
     activeServer && activeServerBoostLevel >= SERVER_BADGE_UNLOCK_LEVEL ? getStarProgressGradient(activeServer.boostPerks.starProgressPalette) : null;
+  const supportableServers = useMemo(
+    () =>
+      servers
+        .filter((server) => server.members.some((member) => member.id === user.id || member.username === user.username))
+        .sort((first, second) => first.name.localeCompare(second.name, "pt-BR")),
+    [servers, user.id, user.username]
+  );
+  const starSupportBalance = isDeveloperUser(user) ? 9999 : 0;
   const activeVoiceChannelDetails =
     activeServer && voiceChannel
       ? getAllServerChannels(activeServer).find((channel) => channel.type === "voice" && channel.name === voiceChannel) ?? null
@@ -4717,17 +4833,17 @@ function WorkspaceShell({
     participants: activeServerVoiceStates,
     muted: micMuted
   });
-  const voiceSettingsChannel =
-    activeServer && voiceSettingsTarget
+  const channelSettingsChannel =
+    activeServer && channelSettingsTarget
       ? activeServer.categories
-          .find((group) => group.name === voiceSettingsTarget.groupName)
-          ?.channels.find((channel) => channel.type === "voice" && channel.name === voiceSettingsTarget.channelName) ?? null
+          .find((group) => group.name === channelSettingsTarget.groupName)
+          ?.channels.find((channel) => channel.name === channelSettingsTarget.channelName) ?? null
       : null;
   const serverMemberGroups = useMemo(() => (activeServer ? getServerMemberGroups(activeServer) : []), [activeServer]);
   const visibleChannelGroups =
     activeServer?.categories.map((group) => ({
       ...group,
-      channels: group.channels.filter((channel) => !channel.special)
+      channels: group.channels.filter((channel) => !channel.special || channel.special === "rules")
     })) ?? [];
   const textChannels = activeServer ? getTextChannels(activeServer) : [];
   const activeChannelDetails = textChannels.find((channel) => channel.name === activeChannel) ?? textChannels[0];
@@ -4813,7 +4929,11 @@ function WorkspaceShell({
         purpose: server.purpose,
         templateId: server.templateId
       }));
-    const allServers = [...createdServers, ...onlineServers].filter((server) => server.members >= 1000);
+    const allServers = [...createdServers, ...onlineServers].sort((first, second) => {
+      const firstJoined = first.id.startsWith("created-") ? 0 : 1;
+      const secondJoined = second.id.startsWith("created-") ? 0 : 1;
+      return firstJoined - secondJoined || first.name.localeCompare(second.name, "pt-BR");
+    });
 
     if (!query) {
       return allServers;
@@ -5293,7 +5413,12 @@ function WorkspaceShell({
         }
 
         const member = server.members.find((item) => item.id === user.id || item.username === user.username) ?? null;
-        const canSyncServer = isDeveloperUser(user) || server.ownerId === user.id || memberHasPermission(server, member, "manage_server", user.id);
+        const canSyncServer =
+          isDeveloperUser(user) ||
+          server.ownerId === user.id ||
+          memberHasPermission(server, member, "manage_server", user.id) ||
+          memberHasPermission(server, member, "manage_channels", user.id) ||
+          memberHasPermission(server, member, "manage_roles", user.id);
         if (!canSyncServer) {
           return;
         }
@@ -5341,6 +5466,84 @@ function WorkspaceShell({
     setServerSettingsInitialView(view);
     setServerSettingsOpen(true);
     setServerMenuOpen(false);
+  }
+
+  function openStarSupportView(serverId = activeServer?.id) {
+    if (serverId && servers.some((server) => server.id === serverId)) {
+      setActiveServerId(serverId);
+    }
+
+    setActiveView("stars");
+    setServerGuideOpen(false);
+    setServerMenuOpen(false);
+    setStarSupportNotice(null);
+  }
+
+  function addStarsToServer(serverId: string) {
+    const targetServer = servers.find((server) => server.id === serverId);
+    if (!targetServer) {
+      setStarSupportNotice("Esse servidor nao esta disponivel nesta conta.");
+      return;
+    }
+
+    const isMember = targetServer.members.some((member) => member.id === user.id || member.username === user.username);
+    if (!isMember) {
+      setStarSupportNotice("Entre no servidor antes de apoiar com estrelas.");
+      return;
+    }
+
+    const amount = Math.min(Math.max(Math.floor(starSupportAmount) || 1, 1), 25);
+    if (starSupportBalance < amount) {
+      setStarSupportNotice("Saldo de estrelas da conta ainda precisa ser conectado antes de liberar apoio real para usuarios.");
+      return;
+    }
+
+    const boosts = Array.from({ length: amount }, () => createServerBoost(user));
+    const boostMessageChannel = targetServer.boostMessageEnabled
+      ? targetServer.boostMessageChannelName ?? getFirstTextChannelName(targetServer) ?? null
+      : null;
+
+    setServers((current) =>
+      current.map((server) => {
+        if (server.id !== serverId) {
+          return server;
+        }
+
+        const activeBoosts = getActiveBoosts(server.boosts, nowTick);
+        const updatedServer = {
+          ...server,
+          boosts: [...boosts, ...activeBoosts],
+          boostProgressVisible: true,
+          boostMessageChannelName: boostMessageChannel ?? server.boostMessageChannelName
+        };
+        return withAudit(
+          updatedServer,
+          "boost_added",
+          server.name,
+          `${amount} estrela${amount === 1 ? "" : "s"} adicionada${amount === 1 ? "" : "s"} por ${user.displayName}.`
+        );
+      })
+    );
+
+    if (boostMessageChannel) {
+      setMessages((current) => [
+        ...current,
+        {
+          author: "Tempest Light",
+          time: new Date().toLocaleTimeString("pt-BR", {
+            hour: "2-digit",
+            minute: "2-digit"
+          }),
+          text: `${user.displayName} adicionou ${amount} estrela${amount === 1 ? "" : "s"} em ${targetServer.name}.`,
+          serverId: targetServer.id,
+          channelName: boostMessageChannel,
+          system: true
+        }
+      ]);
+    }
+
+    setStarSupportAmount(1);
+    setStarSupportNotice(`${amount} estrela${amount === 1 ? "" : "s"} adicionada${amount === 1 ? "" : "s"} ao servidor ${targetServer.name}.`);
   }
 
   function openServerGuide() {
@@ -5875,8 +6078,9 @@ function WorkspaceShell({
     if (activeServer) {
       const messageKey = `${activeServer.id}:${activeChannel}`;
       const lastSentAt = lastServerMessageAt[messageKey] ?? 0;
-      const slowModeWait = Math.ceil((activeServer.automod.slowModeSeconds * 1000 - (Date.now() - lastSentAt)) / 1000);
-      if (activeServer.automod.slowModeSeconds > 0 && slowModeWait > 0) {
+      const channelSlowModeSeconds = activeChannelDetails?.slowModeSeconds ?? activeServer.automod.slowModeSeconds;
+      const slowModeWait = Math.ceil((channelSlowModeSeconds * 1000 - (Date.now() - lastSentAt)) / 1000);
+      if (channelSlowModeSeconds > 0 && slowModeWait > 0) {
         setServerNotice(`Modo lento ativo. Espere ${slowModeWait}s para enviar outra mensagem.`);
         return;
       }
@@ -6089,6 +6293,15 @@ function WorkspaceShell({
     if (!canManageChannels) {
       setServerNotice("Seu cargo nao permite criar canais.");
       setChannelDialogOpen(false);
+      return;
+    }
+
+    if (
+      getAllServerChannels(activeServer).some(
+        (savedChannel) => getServerStructureNameKey(savedChannel.name) === getServerStructureNameKey(channel.name)
+      )
+    ) {
+      setServerNotice("Ja existe um canal com esse nome.");
       return;
     }
 
@@ -6452,12 +6665,36 @@ function WorkspaceShell({
     setDraggedChannel(null);
   }
 
-  function updateVoiceChannelLimit(groupName: string, channelName: string, userLimit: number | null) {
-    if (!activeServer || !canReorderServer) {
+  function saveChannelSettings(groupName: string, channelName: string, input: ChannelSettingsInput) {
+    if (!activeServer || !canManageChannels) {
+      setServerNotice("Seu cargo nao permite editar canais.");
       return;
     }
 
-    const normalizedLimit = userLimit && userLimit > 0 ? Math.min(Math.max(Math.floor(userLimit), 1), 99) : null;
+    const targetChannel = activeServer.categories
+      .find((group) => group.name === groupName)
+      ?.channels.find((channel) => channel.name === channelName) ?? null;
+    if (!targetChannel) {
+      setServerNotice("Canal nao encontrado.");
+      setChannelSettingsTarget(null);
+      return;
+    }
+
+    const nextName = normalizeEditableChannelName(input.name, targetChannel.type);
+    const duplicateName = getAllServerChannels(activeServer).some(
+      (channel) => channel.name !== channelName && getServerStructureNameKey(channel.name) === getServerStructureNameKey(nextName)
+    );
+    if (duplicateName) {
+      setServerNotice("Ja existe um canal com esse nome.");
+      return;
+    }
+
+    const normalizedLimit =
+      targetChannel.type === "voice" && input.userLimit && input.userLimit > 0 ? Math.min(Math.max(Math.floor(input.userLimit), 1), 99) : null;
+    const normalizedSlowMode =
+      targetChannel.type === "text" && input.slowModeSeconds > 0 ? Math.min(Math.max(Math.floor(input.slowModeSeconds), 0), 21600) : 0;
+    const normalizedTopic = targetChannel.type === "text" && input.topic?.trim() ? input.topic.trim().slice(0, 1024) : null;
+
     setServers((current) =>
       current.map((server) => {
         if (server.id !== activeServer.id) {
@@ -6469,21 +6706,119 @@ function WorkspaceShell({
             ? {
                 ...group,
                 channels: group.channels.map((channel) =>
-                  channel.name === channelName && channel.type === "voice" ? { ...channel, userLimit: normalizedLimit } : channel
+                  channel.name === channelName
+                    ? {
+                        ...channel,
+                        name: nextName,
+                        topic: normalizedTopic,
+                        isPrivate: input.isPrivate,
+                        slowModeSeconds: normalizedSlowMode,
+                        userLimit: channel.type === "voice" ? normalizedLimit : null
+                      }
+                    : channel
                 )
               }
             : group
         );
 
         return withAudit(
-          { ...server, categories },
+          {
+            ...server,
+            rulesChannelName: server.rulesChannelName === channelName ? nextName : server.rulesChannelName,
+            updatesChannelName: server.updatesChannelName === channelName ? nextName : server.updatesChannelName,
+            safetyChannelName: server.safetyChannelName === channelName ? nextName : server.safetyChannelName,
+            categories
+          },
           "server_updated",
-          channelName,
-          normalizedLimit ? `Limite do canal de voz definido como ${normalizedLimit}.` : "Limite do canal de voz removido."
+          nextName,
+          nextName === channelName ? "Configuracao do canal atualizada." : `Canal renomeado de ${channelName} para ${nextName}.`
         );
       })
     );
-    setVoiceSettingsTarget(null);
+    if (nextName !== channelName) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.serverId === activeServer.id && message.channelName === channelName ? { ...message, channelName: nextName } : message
+        )
+      );
+      setOnlineVoiceStates((current) =>
+        current.map((state) =>
+          state.serverId === activeServer.id && state.channelName === channelName ? { ...state, channelName: nextName } : state
+        )
+      );
+      if (activeChannel === channelName) {
+        setActiveChannel(nextName);
+      }
+      if (voiceChannel === channelName) {
+        setVoiceChannel(nextName);
+        if (onlineMode && api) {
+          void api
+            .updateServerVoiceState(activeServer.id, { channelName: nextName, muted: micMuted, speaking: voiceSpeaking })
+            .then((result) => upsertOnlineVoiceState(result.voiceState))
+            .catch(() => setOnlineSyncStatus("error"));
+        }
+      }
+    }
+
+    setChannelSettingsTarget(null);
+    setServerNotice("Canal salvo.");
+  }
+
+  function deleteChannel(groupName: string, channelName: string) {
+    if (!activeServer || !canManageChannels) {
+      setServerNotice("Seu cargo nao permite excluir canais.");
+      return;
+    }
+
+    const targetChannel = activeServer.categories
+      .find((group) => group.name === groupName)
+      ?.channels.find((channel) => channel.name === channelName) ?? null;
+    if (!targetChannel) {
+      setServerNotice("Canal nao encontrado.");
+      setChannelSettingsTarget(null);
+      return;
+    }
+
+    const remainingTextChannels = getAllServerChannels(activeServer).filter((channel) => channel.type === "text" && channel.name !== channelName);
+    if (targetChannel.type === "text" && !remainingTextChannels.length) {
+      setServerNotice("Crie outro canal de texto antes de excluir o ultimo.");
+      return;
+    }
+
+    const fallbackTextChannel = remainingTextChannels.find((channel) => !channel.isPrivate)?.name ?? remainingTextChannels[0]?.name ?? "geral";
+    setServers((current) =>
+      current.map((server) => {
+        if (server.id !== activeServer.id) {
+          return server;
+        }
+
+        const categories = server.categories.map((group) =>
+          group.name === groupName ? { ...group, channels: group.channels.filter((channel) => channel.name !== channelName) } : group
+        );
+
+        return withAudit(
+          {
+            ...server,
+            rulesChannelName: server.rulesChannelName === channelName ? null : server.rulesChannelName,
+            updatesChannelName: server.updatesChannelName === channelName ? null : server.updatesChannelName,
+            safetyChannelName: server.safetyChannelName === channelName ? null : server.safetyChannelName,
+            categories
+          },
+          "server_updated",
+          channelName,
+          "Canal excluido."
+        );
+      })
+    );
+    setMessages((current) => current.filter((message) => !(message.serverId === activeServer.id && message.channelName === channelName)));
+    if (activeChannel === channelName) {
+      setActiveChannel(fallbackTextChannel);
+    }
+    if (voiceChannel === channelName) {
+      void leaveVoiceChannel();
+    }
+    setChannelSettingsTarget(null);
+    setServerNotice(`Canal ${channelName} excluido.`);
   }
 
   function createServerInvite() {
@@ -6509,6 +6844,7 @@ function WorkspaceShell({
           } catch {
             setServerNotice(`Convite criado: ${inviteLink}`);
           }
+          setInviteFriendPicker({ inviteLink, serverName: syncedServer.name });
           setOnlineSyncStatus("idle");
         })
         .catch(() => {
@@ -6521,6 +6857,50 @@ function WorkspaceShell({
 
     setServerNotice("A API online precisa estar conectada para criar convites.");
     setServerMenuOpen(false);
+  }
+
+  async function sendServerInviteToFriend(contact: DirectContact) {
+    if (!inviteFriendPicker) {
+      return;
+    }
+
+    const text = `Convite para ${inviteFriendPicker.serverName}: ${inviteFriendPicker.inviteLink}`;
+    const fallbackMessage: LocalMessage = {
+      authorId: user.id,
+      authorUsername: user.username,
+      author: user.displayName,
+      authorAvatarUrl: user.avatarUrl,
+      time: new Date().toLocaleTimeString("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit"
+      }),
+      createdAt: new Date().toISOString(),
+      text
+    };
+
+    if (onlineMode && api) {
+      try {
+        const message = await api.sendDirectMessage(contact.id, { content: text });
+        setDirectMessages((current) => ({
+          ...current,
+          [contact.id]: [...(current[contact.id] ?? []), onlineDirectMessageToLocalMessage(message)]
+        }));
+      } catch {
+        setServerNotice("Nao consegui enviar o convite por DM agora.");
+        setOnlineSyncStatus("error");
+        return;
+      }
+    } else {
+      setDirectMessages((current) => ({
+        ...current,
+        [contact.id]: [...(current[contact.id] ?? []), fallbackMessage]
+      }));
+    }
+
+    setActiveDirectId(contact.id);
+    setActiveView("direct");
+    setInviteFriendPicker(null);
+    setServerNotice(`Convite enviado para ${contact.displayName}.`);
   }
 
   async function createInviteFromApi(options: { duration?: InviteDurationId; maxUses?: number | null }) {
@@ -6580,6 +6960,43 @@ function WorkspaceShell({
 
     removeServerFromWorkspace(serverId, `Servidor ${serverName} excluido permanentemente.`);
     return true;
+  }
+
+  async function leaveActiveServer() {
+    if (!activeServer) {
+      return;
+    }
+
+    if (activeServer.ownerId === user.id) {
+      setServerNotice("O dono precisa excluir ou transferir o servidor; sair como membro fica bloqueado para proteger a comunidade.");
+      setServerMenuOpen(false);
+      return;
+    }
+
+    const serverId = activeServer.id;
+    const serverName = activeServer.name;
+    if (!window.confirm(`Tem certeza que deseja sair de ${serverName}?`)) {
+      setServerMenuOpen(false);
+      return;
+    }
+
+    if (voiceChannel) {
+      await leaveVoiceChannel();
+    }
+
+    if (onlineMode && api) {
+      try {
+        await api.leaveServer(serverId);
+        setOnlineSyncStatus("idle");
+      } catch (caught) {
+        setOnlineSyncStatus("error");
+        setServerNotice(caught instanceof ApiError || caught instanceof Error ? caught.message : "Nao consegui sair deste servidor agora.");
+        setServerMenuOpen(false);
+        return;
+      }
+    }
+
+    removeServerFromWorkspace(serverId, `Voce saiu de ${serverName}.`);
   }
 
   async function banMemberInApi(username: string, reason: string | null) {
@@ -7055,9 +7472,9 @@ function WorkspaceShell({
         setServerNotice(mode === "game" ? "Escolha a janela do jogo para transmitir." : "Escolha a tela para transmitir.");
       }
 
-      await onlineVoiceCall.startScreenShare(screenShareQuality, screenShareFps, mode === "game" ? "window" : "monitor", sourceId);
+      const stream = await onlineVoiceCall.startScreenShare(screenShareQuality, screenShareFps, mode === "game" ? "window" : "monitor", sourceId);
       setVoiceShareMenuOpen(false);
-      setServerNotice("Transmissao iniciada.");
+      setServerNotice(stream.getAudioTracks().length ? "Transmissao iniciada com audio do computador." : "Transmissao iniciada sem audio do computador.");
     } catch (caught) {
       setServerNotice(getScreenShareFailureNotice(caught));
     }
@@ -7273,9 +7690,95 @@ function WorkspaceShell({
     );
   }
 
+  function renderStarSupportView() {
+    return (
+      <div className="star-support-page">
+        <header className="star-support-title">
+          <Sparkles size={20} />
+          <div>
+            <h1>Apoiar servidores com estrelas</h1>
+            <p>Escolha um servidor, envie estrelas e libere recompensas para todos os membros.</p>
+          </div>
+        </header>
+
+        <section className="star-support-toolbar">
+          <div>
+            <span>Saldo da conta</span>
+            <strong>{starSupportBalance.toLocaleString("pt-BR")} estrelas</strong>
+            {!isDeveloperUser(user) ? <small>Saldo real sera conectado ao sistema de compras.</small> : <small>Saldo de teste autorizado.</small>}
+          </div>
+          <label>
+            Quantidade
+            <select value={starSupportAmount} onChange={(event) => setStarSupportAmount(Number(event.target.value) || 1)}>
+              {[1, 2, 5, 10, 25].map((amount) => (
+                <option key={`star-support-amount-${amount}`} value={amount}>
+                  {amount} estrela{amount === 1 ? "" : "s"}
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+
+        {starSupportNotice ? <p className="settings-notice">{starSupportNotice}</p> : null}
+
+        <section className="star-support-grid" aria-label="Servidores que podem receber estrelas">
+          {supportableServers.length ? (
+            supportableServers.map((server) => {
+              const activeBoosts = getActiveBoosts(server.boosts, nowTick);
+              const boostLevel = getBoostLevel(activeBoosts.length);
+              const nextTarget = getNextBoostTarget(activeBoosts.length);
+              const overflow = getBoostOverflowCount(activeBoosts.length);
+              const iconUrl = getServerIconUrl(server, boostLevel);
+              const canSupport = starSupportBalance >= starSupportAmount;
+
+              return (
+                <article className={server.id === activeServerId ? "star-support-card active" : "star-support-card"} key={`star-support-${server.id}`}>
+                  <div className="star-support-card-heading">
+                    <span className={iconUrl ? "star-support-icon has-image" : "star-support-icon"}>
+                      {iconUrl ? <img src={iconUrl} alt="" /> : server.initials}
+                    </span>
+                    <div>
+                      <strong>{server.name}</strong>
+                      <small>
+                        NV. {boostLevel} - {activeBoosts.length}/{nextTarget} estrelas{overflow ? ` (+${overflow})` : ""}
+                      </small>
+                    </div>
+                  </div>
+                  <progress value={Math.min(activeBoosts.length, nextTarget)} max={Math.max(nextTarget, 1)} />
+                  <div className="star-support-card-actions">
+                    <button type="button" onClick={() => selectServer(server.id)}>
+                      Abrir servidor
+                      <ChevronRight size={15} />
+                    </button>
+                    <Button variant="primary" type="button" disabled={!canSupport} onClick={() => addStarsToServer(server.id)}>
+                      Adicionar estrelas ao servidor
+                    </Button>
+                  </div>
+                  {!canSupport ? <small className="star-support-locked">Saldo indisponivel para apoio real nesta versao.</small> : null}
+                </article>
+              );
+            })
+          ) : (
+            <div className="empty-state compact-empty">
+              <Sparkles size={30} />
+              <p>Entre em um servidor para apoiar com estrelas.</p>
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
+
   return (
     <main
-      className={activeServerLegendaryTheme ? "app-shell legendary-server-theme" : "app-shell"}
+      className={[
+        "app-shell",
+        activeServerLegendaryTheme ? "legendary-server-theme" : "",
+        voiceChannel ? "voice-active" : "",
+        hasActiveVoiceStreams ? "has-voice-streams" : ""
+      ]
+        .filter(Boolean)
+        .join(" ")}
       style={activeServerAccentColor ? ({ "--accent": activeServerAccentColor, "--accent-strong": activeServerAccentColor } as CSSProperties) : undefined}
     >
       {Object.entries(onlineVoiceCall.remoteStreams).map(([remoteUserId, stream]) => (
@@ -7489,6 +7992,10 @@ function WorkspaceShell({
                     <Users size={18} />
                     Convidar para o servidor
                   </button>
+                  <button type="button" onClick={() => openStarSupportView(activeServer.id)}>
+                    <Sparkles size={18} />
+                    Adicionar estrelas ao servidor
+                  </button>
                   {canAdministerActiveServer ? (
                     <button type="button" onClick={() => openServerSettings("profile")}>
                       <Settings size={18} />
@@ -7555,6 +8062,12 @@ function WorkspaceShell({
                     <UserRoundCog size={18} />
                     Editar perfil por servidor
                   </button>
+                  {activeServer.ownerId !== user.id ? (
+                    <button className="danger-menu-item" type="button" onClick={() => void leaveActiveServer()}>
+                      <LogOut size={18} />
+                      Sair do servidor
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </header>
@@ -7608,6 +8121,10 @@ function WorkspaceShell({
                 <button type="button" onClick={() => openServerSettings("boosts")}>
                   <Shield size={18} />
                   <span>Estrelas de servidor</span>
+                </button>
+                <button className={activeView === "stars" ? "active" : ""} type="button" onClick={() => openStarSupportView(activeServer.id)}>
+                  <Sparkles size={18} />
+                  <span>Apoiar com Estrelas</span>
                 </button>
               </section>
               {specialChannels.length ? (
@@ -7726,7 +8243,7 @@ function WorkspaceShell({
                             reorderActiveChannel(group.name, channel.name);
                           }}
                         >
-                          <div className={canReorderServer && channel.type === "voice" ? "channel-row has-config" : "channel-row"}>
+                          <div className={canManageChannels ? "channel-row has-config" : "channel-row"}>
                             <button
                               className={[
                                 "channel",
@@ -7780,12 +8297,12 @@ function WorkspaceShell({
                               {hasUnreadChannel ? <span className="unread-dot" aria-label="Mensagens nao lidas" /> : null}
                               {isJoinedVoice ? <Radio size={13} /> : null}
                             </button>
-                            {canReorderServer && channel.type === "voice" ? (
+                            {canManageChannels ? (
                               <button
                                 className="channel-config-button"
                                 type="button"
-                                title="Configurar limite do canal de voz"
-                                onClick={() => setVoiceSettingsTarget({ groupName: group.name, channelName: channel.name })}
+                                title="Configurar canal"
+                                onClick={() => setChannelSettingsTarget({ groupName: group.name, channelName: channel.name })}
                               >
                                 <Settings size={14} />
                               </button>
@@ -7802,23 +8319,29 @@ function WorkspaceShell({
                                 <span>Definir um status do canal</span>
                                 <Edit3 size={12} />
                               </button>
-                              {(onlineMode ? voiceParticipants : []).map((state) => (
-                                <button className="voice-member-row" key={`${state.serverId}-${state.userId}`} type="button" onClick={() => setProfileCardUser(getVoiceProfileCard(state))}>
-                                  <span
-                                    className={[
-                                      "voice-member-avatar-wrap",
-                                      state.muted ? "muted" : "",
-                                      state.speaking && !state.muted ? "speaking" : ""
-                                    ]
-                                      .filter(Boolean)
-                                      .join(" ")}
-                                  >
-                                    <AvatarBadge user={{ displayName: state.displayName, avatarUrl: state.avatarUrl }} className="voice-member-avatar" />
-                                    {state.muted ? <MicOff className="voice-muted-icon" size={13} /> : null}
-                                  </span>
-                                  <span>{state.displayName}</span>
-                                </button>
-                              ))}
+                              {(onlineMode ? voiceParticipants : []).map((state) => {
+                                const liveVoiceMember = activeServer.members.find((member) => member.id === state.userId || member.username === state.username);
+                                const voiceListUser = liveVoiceMember
+                                  ? { displayName: liveVoiceMember.displayName, avatarUrl: liveVoiceMember.avatarUrl }
+                                  : { displayName: state.displayName, avatarUrl: state.avatarUrl };
+                                return (
+                                  <button className="voice-member-row" key={`${state.serverId}-${state.userId}`} type="button" onClick={() => setProfileCardUser(getVoiceProfileCard(state))}>
+                                    <span
+                                      className={[
+                                        "voice-member-avatar-wrap",
+                                        state.muted ? "muted" : "",
+                                        state.speaking && !state.muted ? "speaking" : ""
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" ")}
+                                    >
+                                      <AvatarBadge user={voiceListUser} className="voice-member-avatar" />
+                                      {state.muted ? <MicOff className="voice-muted-icon" size={13} /> : null}
+                                    </span>
+                                    <span>{voiceListUser.displayName}</span>
+                                  </button>
+                                );
+                              })}
                               {onlineMode && isJoinedVoice && !voiceParticipants.some((state) => state.userId === user.id) ? (
                                 <button className="voice-member-row" type="button" onClick={() => setProfileCardUser(getOwnProfileCard())}>
                                   <span className={["voice-member-avatar-wrap", micMuted ? "muted" : "", voiceSpeaking ? "speaking" : ""].filter(Boolean).join(" ")}>
@@ -8233,7 +8756,21 @@ function WorkspaceShell({
             </header>
 
             <div className="discover-pane">
-              <form className="invite-join-panel" onSubmit={joinServerByInvite}>
+              <section className="discover-search-panel" aria-label="Buscar servidores">
+                <label>
+                  <Search size={18} />
+                  <span>Buscar por nome do servidor</span>
+                  <input
+                    value={discoverQuery}
+                    onChange={(event) => setDiscoverQuery(event.target.value)}
+                    placeholder="Digite parte do nome, descricao ou tag"
+                    autoFocus
+                  />
+                </label>
+              </section>
+              <details className="invite-join-secondary">
+                <summary>Entrar por link ou codigo de convite</summary>
+                <form className="invite-join-panel" onSubmit={joinServerByInvite}>
                 <label>
                   Entrar por convite
                   <input
@@ -8246,7 +8783,8 @@ function WorkspaceShell({
                   Entrar
                   <ChevronRight size={17} />
                 </button>
-              </form>
+                </form>
+              </details>
               {renderServerNotice()}
               {discoverResults.map((server) => (
                 <article className="discover-card" key={server.id}>
@@ -8271,6 +8809,8 @@ function WorkspaceShell({
               ) : null}
             </div>
           </>
+        ) : activeView === "stars" ? (
+          renderStarSupportView()
         ) : activeServer && serverGuideOpen && canUseActiveServerGuide ? (
           renderServerGuide()
         ) : activeServer ? (
@@ -8606,11 +9146,25 @@ function WorkspaceShell({
         />
       ) : null}
       {channelDialogOpen ? <CreateChannelDialog onClose={() => setChannelDialogOpen(false)} onCreate={createChannel} /> : null}
-      {voiceSettingsTarget && voiceSettingsChannel ? (
-        <VoiceChannelSettingsDialog
-          channel={voiceSettingsChannel}
-          onClose={() => setVoiceSettingsTarget(null)}
-          onSave={(userLimit) => updateVoiceChannelLimit(voiceSettingsTarget.groupName, voiceSettingsTarget.channelName, userLimit)}
+      {channelSettingsTarget && channelSettingsChannel ? (
+        <ChannelSettingsDialog
+          channel={channelSettingsChannel}
+          canDelete={
+            channelSettingsChannel.type === "voice" ||
+            (activeServer?.categories.flatMap((group) => group.channels).filter((channel) => channel.type === "text").length ?? 0) > 1
+          }
+          onClose={() => setChannelSettingsTarget(null)}
+          onSave={(input) => saveChannelSettings(channelSettingsTarget.groupName, channelSettingsTarget.channelName, input)}
+          onDelete={() => deleteChannel(channelSettingsTarget.groupName, channelSettingsTarget.channelName)}
+        />
+      ) : null}
+      {inviteFriendPicker ? (
+        <InviteFriendPickerDialog
+          contacts={directContacts.filter((contact) => contact.isFriend)}
+          inviteLink={inviteFriendPicker.inviteLink}
+          serverName={inviteFriendPicker.serverName}
+          onClose={() => setInviteFriendPicker(null)}
+          onSend={(contact) => void sendServerInviteToFriend(contact)}
         />
       ) : null}
       {categoryDialogOpen ? <CreateCategoryDialog onClose={() => setCategoryDialogOpen(false)} onCreate={createCategory} /> : null}
@@ -8791,6 +9345,7 @@ function SafePreviewImage({ src, alt = "" }: { src: string; alt?: string }) {
 
 function ExternalLinkPreview({ link, onOpen }: { link: string; onOpen: (link: string) => void }) {
   const youtubeVideoId = getYoutubeVideoId(link);
+  const imagePreviewUrl = getAnimatedImagePreviewUrl(link) ?? (looksLikeImageLink(link) ? link : null);
   const risky = isPotentiallyDangerousExternalLink(link);
   const hostname = (() => {
     try {
@@ -8816,7 +9371,15 @@ function ExternalLinkPreview({ link, onOpen }: { link: string; onOpen: (link: st
     );
   }
 
-  if (looksLikeImageLink(link) || !risky) {
+  if (imagePreviewUrl) {
+    return (
+      <button className="message-image-attachment message-image-link-preview" type="button" onClick={() => onOpen(link)}>
+        <SafePreviewImage src={imagePreviewUrl} alt="" />
+      </button>
+    );
+  }
+
+  if (!risky) {
     return (
       <button className={["message-link-preview", "image", risky ? "risky" : ""].filter(Boolean).join(" ")} type="button" onClick={() => onOpen(link)}>
         <SafePreviewImage src={link} alt="" />
@@ -9152,11 +9715,12 @@ function convertDiscordChannels(channels: DiscordChannel[], guild: DiscordSerial
         ? uniqueImportedName(normalizeDiscordTextChannelName(channel.name || "canal"), usedTextNames)
         : uniqueImportedName(normalizeVoiceChannelName(channel.name || "Canal de voz"), usedVoiceNames);
     const special = channelKind === "text" ? getDiscordSpecialChannel(channel, guild, channelName) : undefined;
+    const pinnedSpecial = special === "rules" ? undefined : special;
     const importedChannel: ChannelDefinition = {
       name: channelName,
       type: channelKind,
       userLimit: channelKind === "voice" && typeof channel.user_limit === "number" && channel.user_limit > 0 ? channel.user_limit : null,
-      ...(special ? { special, isNew: true } : {})
+      ...(pinnedSpecial ? { special: pinnedSpecial, isNew: true } : {})
     };
     const parentGroup = channel.parent_id ? categoryById.get(channel.parent_id) : null;
 
@@ -9746,12 +10310,12 @@ function botAllowsChannel(bot: ServerBotIntegration, channelName: string) {
   return !bot.commandChannelNames.length || bot.commandChannelNames.includes(channelName);
 }
 
-function isBotRuntimeOnline(_bot: ServerBotIntegration) {
-  return false;
+function isBotRuntimeOnline(bot: ServerBotIntegration) {
+  return bot.platform === "tempest" && bot.runtimeEnabled;
 }
 
 function botCanRespondInTempest(bot: ServerBotIntegration) {
-  return bot.runtimeEnabled;
+  return bot.platform === "tempest" && bot.runtimeEnabled;
 }
 
 function botHasModule(bot: ServerBotIntegration, module: BotCommandModule) {
@@ -9918,6 +10482,11 @@ function normalizeTextChannelName(name: string) {
       .replace(/\s+/g, "-")
       .replace(/[^a-z0-9_.-]/g, "") || "canal"
   );
+}
+
+function normalizeEditableChannelName(name: string, type: ChannelKind) {
+  const fallback = type === "voice" ? "Canal de voz" : "canal";
+  return normalizeServerStructureName(name.replace(/[\r\n\t]/g, " "), fallback);
 }
 
 function createAuditLog(
@@ -11252,6 +11821,7 @@ function ServerSettingsDialog({
   const [inviteDurationDraft, setInviteDurationDraft] = useState<InviteDurationId>("never");
   const [inviteMaxUsesDraft, setInviteMaxUsesDraft] = useState(25);
   const [botTokenDraft, setBotTokenDraft] = useState("");
+  const [tempestBotTokenResult, setTempestBotTokenResult] = useState<string | null>(null);
   const [botNameDraft, setBotNameDraft] = useState("");
   const [botPrefixDraft, setBotPrefixDraft] = useState("!");
   const [botCommandDraft, setBotCommandDraft] = useState("ping");
@@ -11907,7 +12477,7 @@ function ServerSettingsDialog({
         boostProgressVisible: true,
         boostMessageChannelName: boostMessageChannel ?? server.boostMessageChannelName
       },
-      { action: "boost_added", target: server.name, details: "Estrela de developer adicionada por 30 dias." }
+      { action: "boost_added", target: server.name, details: "Estrela adicionada ao servidor por 30 dias." }
     );
 
     if (boostMessageChannel) {
@@ -11924,7 +12494,7 @@ function ServerSettingsDialog({
       });
     }
 
-    setSettingsNotice("Estrela de developer adicionada por 30 dias.");
+    setSettingsNotice("Estrela adicionada ao servidor por 30 dias.");
   }
 
   async function publishProgramUpdate() {
@@ -12193,6 +12763,61 @@ function ServerSettingsDialog({
     updateBot(bot.id, { commandChannelNames: nextChannels });
   }
 
+  function resetBotDrafts() {
+    setBotTokenDraft("");
+    setBotNameDraft("");
+    setBotPrefixDraft("!");
+    setBotCommandDraft("ping");
+    setBotReplyDraft("Pong! Bot funcionando dentro do Tempest Light.");
+    setBotModuleDraft(defaultBotCommandModules);
+    setBotChannelDraft([]);
+    setBotCaptchaChecked(false);
+  }
+
+  function addTempestBot() {
+    if (!canManageServerSettings) {
+      setSettingsNotice("Seu cargo nao permite criar bots neste servidor.");
+      return;
+    }
+
+    const token = createTempestBotToken();
+    const displayName = botNameDraft.trim().slice(0, 48) || "Bot Tempest";
+    const username = normalizeTextChannelName(displayName).slice(0, 32) || `bot-${Date.now().toString(36)}`;
+    const { bot, member } = createServerBotFromToken(token, currentUser, {
+      platform: "tempest",
+      username,
+      displayName,
+      description: "Bot criado dentro do Tempest Light.",
+      bridgeStatus: "connected",
+      prefix: botPrefixDraft,
+      commandName: botCommandDraft,
+      replyText: botReplyDraft,
+      commandChannelNames: botChannelDraft,
+      commandModules: botModuleDraft
+    });
+
+    const duplicate = server.bots.some(
+      (savedBot) =>
+        savedBot.username.toLowerCase() === bot.username.toLowerCase() ||
+        savedBot.displayName.toLowerCase() === bot.displayName.toLowerCase()
+    );
+    if (duplicate) {
+      setSettingsNotice("Ja existe um bot com esse nome neste servidor.");
+      return;
+    }
+
+    onUpdateServer(
+      {
+        bots: [bot, ...server.bots],
+        members: [member, ...server.members]
+      },
+      { action: "bot_added", target: bot.displayName, details: "Bot Tempest criado com token interno." }
+    );
+    setTempestBotTokenResult(token);
+    resetBotDrafts();
+    setSettingsNotice("Bot criado dentro do Tempest Light. Guarde o token interno exibido nesta tela.");
+  }
+
   async function addBotFromToken() {
     const token = botTokenDraft.trim();
     if (!canManageServerSettings) {
@@ -12226,6 +12851,7 @@ function ServerSettingsDialog({
     }
 
     const { bot, member } = createServerBotFromToken(token, currentUser, {
+      platform: "discord",
       discordApplicationId: discordBotInfo?.id ?? null,
       username: discordBotInfo?.username,
       displayName: botNameDraft || discordBotInfo?.displayName,
@@ -12251,14 +12877,8 @@ function ServerSettingsDialog({
       },
       { action: "bot_added", target: bot.displayName, details: "Bot adicionado por token mascarado." }
     );
-    setBotTokenDraft("");
-    setBotNameDraft("");
-    setBotPrefixDraft("!");
-    setBotCommandDraft("ping");
-    setBotReplyDraft("Pong! Bot funcionando dentro do Tempest Light.");
-    setBotModuleDraft(defaultBotCommandModules);
-    setBotChannelDraft([]);
-    setBotCaptchaChecked(false);
+    setTempestBotTokenResult(null);
+    resetBotDrafts();
     setSettingsNotice(
       discordBotInfo
         ? `${bot.displayName} foi validado, mas fica pendente ate a ponte confirmar presenca online.`
@@ -12355,13 +12975,19 @@ function ServerSettingsDialog({
     isPrivate: boolean
   ) {
     let found = false;
+    const shouldPin = special !== "rules";
     const nextCategories = categories.map((group) => ({
       ...group,
       channels: group.channels.map((channel) => {
         const clearsSameSlot = channel.special === special;
         if (channel.name === channelName && channel.type === "text") {
           found = true;
-          return { ...channel, special, isPrivate: isPrivate || channel.isPrivate, isNew: true };
+          if (shouldPin) {
+            return { ...channel, special, isPrivate: isPrivate || channel.isPrivate, isNew: true };
+          }
+
+          const { special: _special, isNew: _isNew, ...plainChannel } = channel;
+          return { ...plainChannel, isPrivate: isPrivate || channel.isPrivate };
         }
 
         if (!clearsSameSlot) {
@@ -12389,7 +13015,8 @@ function ServerSettingsDialog({
       return { categories: marked.categories, channelName };
     }
 
-    const channel: ChannelDefinition = { name: channelName, type: "text", isPrivate, special, isNew: true };
+    const channel: ChannelDefinition =
+      special === "rules" ? { name: channelName, type: "text", isPrivate } : { name: channelName, type: "text", isPrivate, special, isNew: true };
     const textGroupIndex = marked.categories.findIndex((group) => group.name === "CANAIS DE TEXTO");
     if (textGroupIndex === -1) {
       return { categories: [{ name: "CANAIS DE TEXTO", channels: [channel] }, ...marked.categories], channelName };
@@ -13844,12 +14471,12 @@ function ServerSettingsDialog({
           </div>
         </div>
         {!canConfigureBoostPerks ? (
-          <p className="settings-notice">Visualizacao das recompensas liberadas. Apenas dono, administradores ou developer podem alterar vantagens.</p>
+          <p className="settings-notice">Visualizacao das recompensas liberadas. Apenas dono, administradores ou conta autorizada podem alterar vantagens.</p>
         ) : developerUser ? (
           <>
             <Button variant="primary" type="button" onClick={addDeveloperBoost}>
               <Sparkles size={18} />
-              Adicionar estrela de developer
+              Adicionar estrela ao servidor
             </Button>
             <section className="developer-update-panel" aria-label="Enviar atualizacao do programa">
               <div>
@@ -13881,7 +14508,7 @@ function ServerSettingsDialog({
             </section>
           </>
         ) : (
-          <p className="settings-notice">Estrelas sao recurso pago. A opcao gratuita aparece apenas para conta autorizada de developer.</p>
+          <p className="settings-notice">Estrelas sao recurso pago. A opcao gratuita aparece apenas para conta autorizada.</p>
         )}
         {renderSettingsNotice()}
         <fieldset className="boost-perk-editor" disabled={!canConfigureBoostPerks}>
@@ -14309,35 +14936,25 @@ function ServerSettingsDialog({
   function renderBotsView() {
     return (
       <section className="settings-main-column">
-        <h2>Ponte Discord Developer Portal</h2>
-        <p>Conecte os bots do seu Developer Portal pelo token. O app instalado valida o bot real no Discord e prepara a ponte para o Tempest.</p>
-        <div className="bot-add-panel">
-          <label>
-            Token do bot no Discord Developer Portal
-            <input
-              value={botTokenDraft}
-              onChange={(event) => setBotTokenDraft(event.target.value)}
-              type="password"
-              placeholder="Cole o token do bot"
-              spellCheck={false}
-            />
-          </label>
+        <h2>Bots do Tempest Light</h2>
+        <p>Crie bots proprios dentro do Tempest, com token interno e comandos configuraveis, sem depender do Discord Developer Portal.</p>
+        <div className="bot-add-panel tempest-bot-panel">
           <label>
             Nome exibido no Tempest
             <input
               value={botNameDraft}
               onChange={(event) => setBotNameDraft(event.target.value)}
               maxLength={48}
-              placeholder="Vazio usa o nome real do Developer Portal"
+              placeholder="Bot Tempest"
             />
           </label>
           <div className="bot-command-grid">
             <label>
-              Prefixo de teste
+              Prefixo
               <input value={botPrefixDraft} onChange={(event) => setBotPrefixDraft(event.target.value.slice(0, 4))} maxLength={4} />
             </label>
             <label>
-              Comando de teste
+              Comando inicial
               <input
                 value={botCommandDraft}
                 onChange={(event) => setBotCommandDraft(event.target.value.replace(/\s+/g, "").slice(0, 24))}
@@ -14346,7 +14963,7 @@ function ServerSettingsDialog({
             </label>
           </div>
           <label>
-            Resposta de teste da ponte
+            Resposta inicial
             <input value={botReplyDraft} onChange={(event) => setBotReplyDraft(event.target.value)} maxLength={240} />
           </label>
           <div className="bot-config-section">
@@ -14385,15 +15002,43 @@ function ServerSettingsDialog({
               </div>
             ) : null}
           </div>
-          <label className="checkbox-row bot-captcha-row">
-            <input checked={botCaptchaChecked} onChange={(event) => setBotCaptchaChecked(event.target.checked)} type="checkbox" />
-            Nao sou um robo
-          </label>
-          <Button variant="primary" type="button" onClick={() => void addBotFromToken()} disabled={!canManageServerSettings || botConnecting}>
+          <Button variant="primary" type="button" onClick={addTempestBot} disabled={!canManageServerSettings}>
             <Bot size={18} />
-            {botConnecting ? "Conectando..." : "Conectar bot"}
+            Criar bot Tempest
           </Button>
+          {tempestBotTokenResult ? (
+            <div className="bot-token-box">
+              <strong>Token interno gerado</strong>
+              <code>{tempestBotTokenResult}</code>
+              <small>Use este token somente na hospedagem/runtime do bot Tempest. Ele nao e token do Discord Developer.</small>
+            </div>
+          ) : null}
         </div>
+
+        <details className="bot-legacy-panel">
+          <summary>Migrar bot externo por token do Discord</summary>
+          <div className="bot-add-panel">
+            <label>
+              Token do bot no Discord Developer Portal
+              <input
+                value={botTokenDraft}
+                onChange={(event) => setBotTokenDraft(event.target.value)}
+                type="password"
+                placeholder="Cole o token do bot"
+                spellCheck={false}
+              />
+            </label>
+            <label className="checkbox-row bot-captcha-row">
+              <input checked={botCaptchaChecked} onChange={(event) => setBotCaptchaChecked(event.target.checked)} type="checkbox" />
+              Nao sou um robo
+            </label>
+            <Button variant="secondary" type="button" onClick={() => void addBotFromToken()} disabled={!canManageServerSettings || botConnecting}>
+              <Bot size={18} />
+              {botConnecting ? "Conectando..." : "Migrar bot externo"}
+            </Button>
+          </div>
+        </details>
+
         {renderSettingsNotice()}
         <div className="bot-list">
           {server.bots.length ? (
@@ -14406,14 +15051,29 @@ function ServerSettingsDialog({
                     {bot.displayName}
                     <span className="bot-badge">APP</span>
                   </strong>
-                  <span>@{bot.username} - token {bot.tokenPreview}</span>
+                  <span>@{bot.username} - {bot.platform === "tempest" ? "Tempest interno" : "Discord externo"} - token {bot.tokenPreview}</span>
                   {bot.description ? <p>{bot.description}</p> : null}
                   <span>
-                    Ponte: {bot.bridgeStatus === "connected" ? "Developer Portal conectado" : bot.bridgeStatus === "error" ? "erro de conexao" : "validacao pendente"}
+                    Ponte:{" "}
+                    {bot.platform === "tempest"
+                      ? "token Tempest ativo"
+                      : bot.bridgeStatus === "connected"
+                        ? "Developer Portal conectado"
+                        : bot.bridgeStatus === "error"
+                          ? "erro de conexao"
+                          : "validacao pendente"}
                   </span>
-                  <span>Status no Tempest: offline ate a ponte real do bot estar rodando.</span>
+                  <span>
+                    Status no Tempest:{" "}
+                    {isBotRuntimeOnline(bot)
+                      ? "online enquanto o runtime interno estiver ligado"
+                      : bot.platform === "tempest"
+                        ? "desativado neste servidor"
+                        : "offline ate a ponte real do bot estar rodando"}
+                  </span>
                   <span>Comandos: {bot.prefix}{bot.commandName}, {bot.prefix}help, {bot.prefix}play, {bot.prefix}ban, {bot.prefix}dado, {bot.prefix}saldo</span>
                   <span>Canais: {bot.commandChannelNames.length ? bot.commandChannelNames.map((channel) => `#${channel}`).join(", ") : "todos os canais de texto"}</span>
+                  {bot.platform === "tempest" && bot.internalToken ? <code className="bot-token-code">{bot.internalToken}</code> : null}
                   <small>Adicionado em {new Date(bot.addedAt).toLocaleString("pt-BR")}</small>
                 </div>
                 <ToggleSwitch checked={bot.runtimeEnabled} onChange={(checked) => updateBot(bot.id, { runtimeEnabled: checked })} />
@@ -15129,6 +15789,61 @@ function CreateCategoryDialog({
   );
 }
 
+function InviteFriendPickerDialog({
+  contacts,
+  inviteLink,
+  serverName,
+  onClose,
+  onSend
+}: {
+  contacts: DirectContact[];
+  inviteLink: string;
+  serverName: string;
+  onClose: () => void;
+  onSend: (contact: DirectContact) => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel compact invite-friend-panel" aria-label="Enviar convite para amigos">
+        <header className="modal-header">
+          <div>
+            <h2>Convidar amigos</h2>
+            <p>{serverName}</p>
+          </div>
+          <button className="icon-button" title="Fechar" type="button" onClick={onClose}>
+            <X size={17} />
+          </button>
+        </header>
+
+        <div className="invite-link-box">
+          <span>Link criado</span>
+          <code>{inviteLink}</code>
+        </div>
+
+        <div className="invite-friend-list">
+          {contacts.length ? (
+            contacts.map((contact) => (
+              <button className="invite-friend-row" key={contact.id} type="button" onClick={() => onSend(contact)}>
+                <AvatarBadge user={contact} className="avatar" />
+                <span>
+                  <strong>{contact.displayName}</strong>
+                  <small>@{contact.username}</small>
+                </span>
+                <Send size={16} />
+              </button>
+            ))
+          ) : (
+            <div className="empty-state compact-empty">
+              <UserPlus size={28} />
+              <p>Adicione amigos para enviar convite direto por DM.</p>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function MentionInboxDialog({
   notifications,
   onClose,
@@ -15285,58 +16000,228 @@ function ServerNotificationDialog({
   );
 }
 
-function VoiceChannelSettingsDialog({
+function ChannelSettingsDialog({
   channel,
+  canDelete,
   onClose,
-  onSave
+  onSave,
+  onDelete
 }: {
   channel: ChannelDefinition;
+  canDelete: boolean;
   onClose: () => void;
-  onSave: (userLimit: number | null) => void;
+  onSave: (input: ChannelSettingsInput) => void;
+  onDelete: () => void;
 }) {
+  const [activeTab, setActiveTab] = useState<ChannelSettingsTab>("overview");
+  const [name, setName] = useState(channel.name);
+  const [topic, setTopic] = useState(channel.topic ?? "");
+  const [isPrivate, setIsPrivate] = useState(Boolean(channel.isPrivate));
+  const [slowModeSeconds, setSlowModeSeconds] = useState(channel.slowModeSeconds ?? 0);
   const [limitEnabled, setLimitEnabled] = useState(Boolean(channel.userLimit));
   const [userLimit, setUserLimit] = useState(channel.userLimit ?? 25);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    onSave(limitEnabled ? Math.min(Math.max(Math.floor(userLimit) || 1, 1), 99) : null);
+    const nextName = normalizeEditableChannelName(name, channel.type);
+    if (!nextName) {
+      setError("Escolha um nome para o canal.");
+      return;
+    }
+
+    onSave({
+      name: nextName,
+      topic: channel.type === "text" && topic.trim() ? topic.trim() : null,
+      isPrivate,
+      slowModeSeconds: channel.type === "text" ? Math.min(Math.max(Math.floor(slowModeSeconds) || 0, 0), 21600) : 0,
+      userLimit: channel.type === "voice" && limitEnabled ? Math.min(Math.max(Math.floor(userLimit) || 1, 1), 99) : null
+    });
+  }
+
+  function requestDelete() {
+    if (!canDelete) {
+      setError("Crie outro canal de texto antes de excluir o ultimo.");
+      return;
+    }
+
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      setError("Clique em confirmar exclusao para remover este canal.");
+      return;
+    }
+
+    onDelete();
+  }
+
+  const tabs: Array<{ id: ChannelSettingsTab; label: string }> = [
+    { id: "overview", label: "Visao geral" },
+    { id: "permissions", label: "Permissoes" },
+    { id: "invites", label: "Convites" },
+    { id: "integrations", label: "Integracoes" }
+  ];
+
+  const slowModeOptions = [
+    { value: 0, label: "Desligado" },
+    { value: 5, label: "5 segundos" },
+    { value: 10, label: "10 segundos" },
+    { value: 30, label: "30 segundos" },
+    { value: 60, label: "1 minuto" },
+    { value: 300, label: "5 minutos" },
+    { value: 900, label: "15 minutos" },
+    { value: 3600, label: "1 hora" },
+    { value: 21600, label: "6 horas" }
+  ];
+
+  function renderOverview() {
+    return (
+      <form className="profile-form channel-settings-form" onSubmit={submit}>
+        <label>
+          Nome do canal
+          <input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} required />
+        </label>
+
+        {channel.type === "text" ? (
+          <>
+            <label>
+              Assunto do canal
+              <textarea
+                value={topic}
+                onChange={(event) => setTopic(event.target.value)}
+                maxLength={1024}
+                placeholder="Mostre para todo mundo como se usa este canal."
+              />
+            </label>
+            <label>
+              Modo lento
+              <select value={slowModeSeconds} onChange={(event) => setSlowModeSeconds(Number(event.target.value) || 0)}>
+                {slowModeOptions.map((option) => (
+                  <option value={option.value} key={`slow-${option.value}`}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        ) : (
+          <>
+            <label className="checkbox-row">
+              <input checked={limitEnabled} onChange={(event) => setLimitEnabled(event.target.checked)} type="checkbox" />
+              Definir limite de usuarios
+            </label>
+            {limitEnabled ? (
+              <label>
+                Limite da call
+                <input type="number" min={1} max={99} value={userLimit} onChange={(event) => setUserLimit(Number(event.target.value) || 1)} />
+              </label>
+            ) : null}
+          </>
+        )}
+
+        <label className="checkbox-row">
+          <input checked={isPrivate} onChange={(event) => setIsPrivate(event.target.checked)} type="checkbox" />
+          Canal privado
+        </label>
+        {error ? <p className="form-error">{error}</p> : null}
+        <Button variant="primary" type="submit">
+          <CheckCircle2 size={18} />
+          Salvar canal
+        </Button>
+      </form>
+    );
+  }
+
+  function renderPermissions() {
+    return (
+      <div className="channel-settings-stack">
+        <section className="channel-permission-card">
+          <Lock size={18} />
+          <div>
+            <strong>Canal privado</strong>
+            <span>Somente membros e cargos selecionados poderao visualizar este canal.</span>
+          </div>
+          <ToggleSwitch checked={isPrivate} onChange={setIsPrivate} />
+        </section>
+        <section className="channel-settings-row">
+          <div>
+            <strong>Permissoes avancadas</strong>
+            <span>Cargos e permissoes por canal ficam preparados para a proxima camada da API.</span>
+          </div>
+          <ChevronRight size={18} />
+        </section>
+      </div>
+    );
+  }
+
+  function renderInvites() {
+    return (
+      <div className="channel-settings-stack">
+        <p className="channel-settings-copy">Convites do servidor ja funcionam; convites por canal ficam prontos para serem ligados ao envio para amigos.</p>
+        <Button variant="secondary" type="button" disabled>
+          <UserPlus size={18} />
+          Criar convite do canal
+        </Button>
+      </div>
+    );
+  }
+
+  function renderIntegrations() {
+    return (
+      <div className="channel-settings-stack">
+        <section className="channel-settings-row">
+          <Bot size={18} />
+          <div>
+            <strong>Webhooks</strong>
+            <span>0 webhook</span>
+          </div>
+          <Button variant="secondary" type="button" disabled>
+            Criar webhook
+          </Button>
+        </section>
+        <section className="channel-settings-row">
+          <MessagesSquare size={18} />
+          <div>
+            <strong>Canais seguidos</strong>
+            <span>0 canal</span>
+          </div>
+          <Button variant="secondary" type="button" disabled>
+            Saiba mais
+          </Button>
+        </section>
+      </div>
+    );
   }
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-panel compact" aria-label="Configurar canal de voz">
-        <header className="modal-header">
-          <div>
-            <h2>{channel.name}</h2>
-            <p>Limite de usuarios da call</p>
-          </div>
-          <button className="icon-button" title="Fechar" type="button" onClick={onClose}>
-            <X size={17} />
+      <section className="modal-panel channel-settings-modal" aria-label="Configuracao do canal">
+        <aside className="channel-settings-nav">
+          <strong>{channel.type === "voice" ? <Volume2 size={15} /> : <Hash size={15} />} {channel.name}</strong>
+          {tabs.map((tab) => (
+            <button className={activeTab === tab.id ? "active" : ""} key={tab.id} type="button" onClick={() => setActiveTab(tab.id)}>
+              {tab.label}
+            </button>
+          ))}
+          <button className={deleteArmed ? "channel-settings-delete armed" : "channel-settings-delete"} type="button" onClick={requestDelete}>
+            <Trash2 size={15} />
+            {deleteArmed ? "Confirmar exclusao" : "Excluir canal"}
           </button>
-        </header>
-
-        <form className="profile-form" onSubmit={submit}>
-          <label className="checkbox-row">
-            <input checked={limitEnabled} onChange={(event) => setLimitEnabled(event.target.checked)} type="checkbox" />
-            Definir limite de usuarios
-          </label>
-          {limitEnabled ? (
-            <label>
-              Limite
-              <input
-                type="number"
-                min={1}
-                max={99}
-                value={userLimit}
-                onChange={(event) => setUserLimit(Number(event.target.value) || 1)}
-              />
-            </label>
-          ) : null}
-          <Button variant="primary" type="submit">
-            <CheckCircle2 size={18} />
-            Salvar canal de voz
-          </Button>
-        </form>
+        </aside>
+        <main className="channel-settings-content">
+          <button className="settings-close" title="Fechar" type="button" onClick={onClose}>
+            <X size={22} />
+            <span>ESC</span>
+          </button>
+          <h2>{tabs.find((tab) => tab.id === activeTab)?.label}</h2>
+          {activeTab === "overview"
+            ? renderOverview()
+            : activeTab === "permissions"
+              ? renderPermissions()
+              : activeTab === "invites"
+                ? renderInvites()
+                : renderIntegrations()}
+        </main>
       </section>
     </div>
   );
@@ -15358,14 +16243,7 @@ function CreateChannelDialog({
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    const normalizedName =
-      type === "text"
-        ? name
-            .trim()
-            .toLowerCase()
-            .replace(/\s+/g, "-")
-            .replace(/[^a-z0-9_.-]/g, "")
-        : name.trim();
+    const normalizedName = normalizeEditableChannelName(name, type);
 
     if (!normalizedName) {
       setError("Escolha um nome para o canal.");
