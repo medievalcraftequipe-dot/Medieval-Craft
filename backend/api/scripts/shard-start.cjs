@@ -32,6 +32,11 @@ async function ensureEmergencyColumns() {
 }
 
 async function boot() {
+  const generate = runPrisma(["generate"]);
+  if (generate.status !== 0) {
+    process.exit(generate.status ?? 1);
+  }
+
   const migrate = runPrisma(["migrate", "deploy"]);
 
   if (migrate.status !== 0) {
