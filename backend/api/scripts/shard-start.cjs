@@ -13,13 +13,40 @@ if (missing.length > 0) {
 }
 
 const prismaCli = require.resolve("prisma/build/index.js");
-const migrate = spawnSync(process.execPath, [prismaCli, "migrate", "deploy", "--schema", "prisma/schema.prisma"], {
-  stdio: "inherit",
-  env: process.env
-});
 
-if (migrate.status !== 0) {
-  process.exit(migrate.status ?? 1);
+function runPrisma(args) {
+  return spawnSync(process.execPath, [prismaCli, ...args, "--schema", "prisma/schema.prisma"], {
+    stdio: "inherit",
+    env: process.env
+  });
 }
 
-require("../dist/main.js");
+async function ensureEmergencyColumns() {
+  const { PrismaClient } = require("@prisma/client");
+  const prisma = new PrismaClient();
+  try {
+    await prisma.$executeRawUnsafe('ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "starBalance" INTEGER NOT NULL DEFAULT 0');
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+async function boot() {
+  const migrate = runPrisma(["migrate", "deploy"]);
+
+  if (migrate.status !== 0) {
+    console.warn("Prisma migrate deploy falhou. Tentando compatibilizar colunas conhecidas antes de iniciar a API.");
+    try {
+      await ensureEmergencyColumns();
+      runPrisma(["migrate", "resolve", "--applied", "20260909200500_user_star_balance"]);
+    } catch (caught) {
+      console.error("Nao foi possivel preparar o banco para iniciar a API.");
+      console.error(caught);
+      process.exit(migrate.status ?? 1);
+    }
+  }
+
+  require("../dist/main.js");
+}
+
+void boot();
