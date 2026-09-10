@@ -689,8 +689,7 @@ button {
   min-width: 0;
 }
 
-.server-title-button strong,
-.server-title-button span {
+.server-title-button strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

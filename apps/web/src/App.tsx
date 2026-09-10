@@ -8197,7 +8197,6 @@ function WorkspaceShell({
                       <span className="server-badge-pill">{activeServer.boostPerks.serverBadgeText}</span>
                     ) : null}
                   </strong>
-                  <span>Servidor de {user.displayName}</span>
                 </div>
                 <ChevronDown size={17} />
               </button>
@@ -9406,7 +9405,7 @@ function WorkspaceShell({
       {createServerStep ? (
         <CreateServerDialog
           step={createServerStep}
-          defaultName={`Servidor de ${user.displayName}`}
+          defaultName="Novo servidor"
           purpose={pendingServerPurpose}
           templateId={pendingServerTemplateId}
           onBack={() =>
