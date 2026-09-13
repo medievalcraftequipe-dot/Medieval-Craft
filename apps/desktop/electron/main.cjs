@@ -166,6 +166,7 @@ if (hasSingleInstanceLock) {
   }
 
   app.whenReady().then(() => {
+    registerYoutubeEmbedHeaders();
     registerDisplayMediaHandler();
     registerIpc();
     createWindow();
@@ -183,6 +184,35 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
+
+function registerYoutubeEmbedHeaders() {
+  const filter = {
+    urls: [
+      "https://*.youtube.com/*",
+      "https://youtube.com/*",
+      "https://*.youtube-nocookie.com/*",
+      "https://youtube-nocookie.com/*",
+      "https://*.googlevideo.com/*",
+      "https://*.ytimg.com/*"
+    ]
+  };
+
+  session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
+    const requestHeaders = { ...details.requestHeaders };
+    const hasReferer = Object.keys(requestHeaders).some((name) => name.toLowerCase() === "referer");
+    const hasOrigin = Object.keys(requestHeaders).some((name) => name.toLowerCase() === "origin");
+
+    if (!hasReferer) {
+      requestHeaders.Referer = "https://www.youtube.com/";
+    }
+
+    if (!hasOrigin && ["subFrame", "script", "xhr"].includes(details.resourceType)) {
+      requestHeaders.Origin = "https://www.youtube.com";
+    }
+
+    callback({ requestHeaders });
+  });
+}
 
 function registerIpc() {
   ipcMain.handle("launcher:get-app-info", () => ({

@@ -3133,7 +3133,14 @@ function getYoutubeVideoId(link: string) {
 }
 
 function getYoutubeEmbedUrl(videoId: string) {
-  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0`;
+  const params = new URLSearchParams({
+    autoplay: "1",
+    enablejsapi: "1",
+    origin: "https://www.youtube.com",
+    playsinline: "1",
+    rel: "0"
+  });
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
 }
 
 function getYoutubeOEmbedUrl(link: string) {
@@ -10020,6 +10027,7 @@ function YoutubePlayerDialog({
           title={title}
           src={getYoutubeEmbedUrl(videoId)}
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          referrerPolicy="strict-origin-when-cross-origin"
           allowFullScreen
         />
         <button className="youtube-open-external" type="button" onClick={() => onOpenExternal(link)}>
