@@ -2244,6 +2244,54 @@ function getPublicInviteBaseUrl() {
   return /\/api\/v1$/i.test(baseUrl) ? `${baseUrl}/invite` : `${baseUrl}/api/v1/invite`;
 }
 
+function getTempestInviteParts(value: string) {
+  const rawInput = value.trim();
+  if (!rawInput) {
+    return { code: "", slug: null as string | null };
+  }
+
+  try {
+    const url = new URL(rawInput);
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    if (url.protocol === "tempest-light:") {
+      return {
+        code: decodeURIComponent(pathParts.at(-1) ?? ""),
+        slug: pathParts.length > 1 ? decodeURIComponent(pathParts.at(-2) ?? "") : null
+      };
+    }
+
+    const inviteIndex = pathParts.findIndex((part) => part.toLowerCase() === "invite");
+    const inviteParts = inviteIndex >= 0 ? pathParts.slice(inviteIndex + 1) : pathParts;
+
+    return {
+      code: decodeURIComponent(inviteParts.at(-1) ?? ""),
+      slug: inviteParts.length > 1 ? decodeURIComponent(inviteParts.at(-2) ?? "") : null
+    };
+  } catch {
+    const cleanedInput = rawInput.replace(/^@+/, "").split(/[?#]/)[0];
+    const parts = cleanedInput.split("/").filter(Boolean);
+    return {
+      code: parts.at(-1) ?? cleanedInput,
+      slug: parts.length > 1 ? parts.at(-2) ?? null : null
+    };
+  }
+}
+
+function getInviteDisplayLabel(inviteLink: string, knownServers: ServerDefinition[] = []) {
+  const { code, slug } = getTempestInviteParts(inviteLink);
+  const matchingServer = knownServers.find((server) => server.invites.some((invite) => invite.code === code));
+
+  if (matchingServer) {
+    return `Tempest Light - ${matchingServer.name}`;
+  }
+
+  if (slug) {
+    return `Tempest Light - ${slug.replace(/[-_]+/g, " ")}`;
+  }
+
+  return "Tempest Light - convite";
+}
+
 function isTempestInviteLink(value: string) {
   try {
     const url = new URL(value);
@@ -6131,10 +6179,14 @@ function WorkspaceShell({
     );
   }
 
+  function getWorkspaceInviteDisplayLabel(inviteLink: string) {
+    return getInviteDisplayLabel(inviteLink, [...servers, ...onlineDiscoverServers]);
+  }
+
   function renderDirectMessageText(text: string) {
     const inviteNodes = renderInviteLinksInText(text, (inviteLink, key) => (
       <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-        {inviteLink}
+        {getWorkspaceInviteDisplayLabel(inviteLink)}
       </button>
     ));
 
@@ -6148,7 +6200,7 @@ function WorkspaceShell({
     if (!activeServer) {
       const inviteNodes = renderInviteLinksInText(rawText, (inviteLink, key) => (
         <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-          {inviteLink}
+          {getWorkspaceInviteDisplayLabel(inviteLink)}
         </button>
       ));
 
@@ -6171,7 +6223,7 @@ function WorkspaceShell({
         if (isTempestInviteLink(inviteLink)) {
           parts.push(
             <button className="message-invite-link" key={`${message.time}-${match.index}-${inviteLink}`} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-              {inviteLink}
+              {getWorkspaceInviteDisplayLabel(inviteLink)}
             </button>
           );
           if (trailing) {
@@ -6227,7 +6279,7 @@ function WorkspaceShell({
   function renderServerNoticeText(text: string) {
     return renderInviteLinksInText(text, (inviteLink, key) => (
       <button className="notice-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-        {inviteLink}
+        {getWorkspaceInviteDisplayLabel(inviteLink)}
       </button>
     ));
   }
@@ -9730,7 +9782,6 @@ function WorkspaceShell({
       {inviteFriendPicker ? (
         <InviteFriendPickerDialog
           contacts={directContacts.filter((contact) => contact.isFriend)}
-          inviteLink={inviteFriendPicker.inviteLink}
           serverName={inviteFriendPicker.serverName}
           onClose={() => setInviteFriendPicker(null)}
           onSend={(contact) => void sendServerInviteToFriend(contact)}
@@ -12567,17 +12618,19 @@ function ServerSettingsDialog({
 
     return (
       <p className="settings-notice">
-        {renderInviteLinksInText(settingsNotice, (inviteLink, key) =>
-          onOpenInviteLink ? (
+        {renderInviteLinksInText(settingsNotice, (inviteLink, key) => {
+          const inviteLabel = getInviteDisplayLabel(inviteLink, [server]);
+
+          return onOpenInviteLink ? (
             <button className="notice-invite-link" key={key} type="button" onClick={() => onOpenInviteLink(inviteLink)}>
-              {inviteLink}
+              {inviteLabel}
             </button>
           ) : (
             <a className="notice-invite-link" href={inviteLink} key={key}>
-              {inviteLink}
+              {inviteLabel}
             </a>
-          )
-        )}
+          );
+        })}
       </p>
     );
   }
@@ -14450,17 +14503,18 @@ function ServerSettingsDialog({
           {server.invites.length ? (
             server.invites.map((invite) => {
               const inviteLink = getServerInviteLink(server, invite.code);
+              const inviteLabel = getInviteDisplayLabel(inviteLink, [server]);
 
               return (
                 <article className={isInviteUsable(invite) ? "invite-row" : "invite-row disabled"} key={invite.id}>
                   <div>
                     {onOpenInviteLink ? (
                       <button className="invite-link" type="button" onClick={() => onOpenInviteLink(inviteLink)}>
-                        {inviteLink}
+                        {inviteLabel}
                       </button>
                     ) : (
                       <a className="invite-link" href={inviteLink}>
-                        {inviteLink}
+                        {inviteLabel}
                       </a>
                     )}
                     <span>
@@ -16485,17 +16539,17 @@ function CreateCategoryDialog({
 
 function InviteFriendPickerDialog({
   contacts,
-  inviteLink,
   serverName,
   onClose,
   onSend
 }: {
   contacts: DirectContact[];
-  inviteLink: string;
   serverName: string;
   onClose: () => void;
   onSend: (contact: DirectContact) => void;
 }) {
+  const inviteLabel = `Tempest Light - ${serverName}`;
+
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal-panel compact invite-friend-panel" aria-label="Enviar convite para amigos">
@@ -16511,7 +16565,7 @@ function InviteFriendPickerDialog({
 
         <div className="invite-link-box">
           <span>Link criado</span>
-          <code>{inviteLink}</code>
+          <code>{inviteLabel}</code>
         </div>
 
         <div className="invite-friend-list">
