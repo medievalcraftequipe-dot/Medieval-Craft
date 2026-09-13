@@ -7428,14 +7428,6 @@ img.profile-account-avatar {
 }
 
 @media (max-width: 1180px) {
-  .app-shell.voice-active {
-    grid-template-columns: 66px minmax(250px, 312px) minmax(0, 1fr);
-  }
-
-  .app-shell.voice-active .member-sidebar {
-    display: none;
-  }
-
   .app-shell.voice-active .voice-stream-stage {
     grid-template-columns: minmax(0, 1fr);
     margin-left: 0;
@@ -7453,10 +7445,6 @@ img.profile-account-avatar {
     grid-template-columns: 1fr;
   }
 
-  .app-shell.voice-active {
-    grid-template-columns: 62px minmax(220px, 280px) minmax(0, 1fr);
-  }
-
   .channel-settings-modal {
     grid-template-columns: 220px minmax(0, 1fr);
   }
@@ -7467,14 +7455,6 @@ img.profile-account-avatar {
 }
 
 @media (max-width: 900px) {
-  .app-shell.voice-active {
-    grid-template-columns: 62px minmax(0, 1fr);
-  }
-
-  .app-shell.voice-active .channel-sidebar {
-    display: none;
-  }
-
   .app-shell.voice-active .chat-pane {
     min-width: 0;
   }
