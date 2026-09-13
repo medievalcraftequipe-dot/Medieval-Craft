@@ -398,7 +398,9 @@ function quoteBatchValue(value) {
 }
 
 function startSilentUpdateInstaller(installerPath) {
-  const installerArgs = ["/S", "/currentuser"];
+  const installerArgs = ["/S", "/currentuser", "--updated", "--force-run"];
+  const launcherPath = process.execPath;
+  const launcherImageName = path.basename(launcherPath);
 
   if (process.platform !== "win32") {
     const child = spawn(installerPath, installerArgs, {
@@ -410,9 +412,13 @@ function startSilentUpdateInstaller(installerPath) {
   }
 
   const updateScriptPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.cmd`);
+  const updateLogPath = path.join(os.tmpdir(), "tempest-light-update.log");
   const lines = [
     "@echo off",
-    "set attempts=60",
+    "setlocal",
+    `set "TEMPEST_UPDATE_LOG=${updateLogPath.replace(/%/g, "%%").replace(/"/g, "")}"`,
+    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Starting Tempest Light update from PID ${process.pid}.`,
+    "set attempts=120",
     ":wait_for_exit",
     `tasklist /fi "PID eq ${process.pid}" 2>nul | findstr /r "\\<${process.pid}\\>" >nul`,
     "if errorlevel 1 goto run_update",
@@ -421,8 +427,24 @@ function startSilentUpdateInstaller(installerPath) {
     "timeout /t 1 /nobreak >nul",
     "goto wait_for_exit",
     ":run_update",
+    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Running installer: ${installerPath.replace(/%/g, "%%")}`,
     `start "" /wait ${quoteBatchValue(installerPath)} ${installerArgs.join(" ")}`,
-    `start "" ${quoteBatchValue(process.execPath)}`,
+    "set install_exit=%errorlevel%",
+    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Installer finished with exit code %install_exit%.`,
+    "timeout /t 2 /nobreak >nul",
+    "set launch_attempts=30",
+    ":launch_app",
+    `if exist ${quoteBatchValue(launcherPath)} start "" ${quoteBatchValue(launcherPath)} --updated`,
+    "timeout /t 2 /nobreak >nul",
+    `tasklist /fi "imagename eq ${launcherImageName}" 2>nul | find /i ${quoteBatchValue(launcherImageName)} >nul`,
+    "if not errorlevel 1 goto cleanup",
+    "if \"%launch_attempts%\"==\"0\" goto cleanup",
+    "set /a launch_attempts=launch_attempts-1 >nul",
+    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Waiting to relaunch Tempest Light. Attempts left: %launch_attempts%.`,
+    "timeout /t 1 /nobreak >nul",
+    "goto launch_app",
+    ":cleanup",
+    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Update helper finished.`,
     "del \"%~f0\" >nul 2>nul"
   ];
 
