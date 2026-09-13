@@ -2979,7 +2979,8 @@ img.profile-avatar {
   bottom: calc(100% + 8px);
   z-index: 50;
   display: grid;
-  width: min(320px, calc(100vw - 94px));
+  width: min(500px, calc(100vw - 94px));
+  max-height: min(560px, calc(100vh - 132px));
   gap: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2988,11 +2989,55 @@ img.profile-avatar {
   padding: 10px;
 }
 
-.composer-picker header {
+.composer-picker-tabs {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+}
+
+.composer-picker-tabs > button:not(.mini-action) {
+  min-height: 32px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 900;
+  padding: 0 12px;
+}
+
+.composer-picker-tabs > button:not(.mini-action):hover,
+.composer-picker-tabs > button:not(.mini-action).active {
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.composer-picker-tabs .mini-action {
+  margin-left: auto;
+}
+
+.composer-picker-search {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
   gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 18%);
+  border-radius: 7px;
+  background: var(--surface-strong);
+  color: var(--muted);
+  padding: 0 10px;
+}
+
+.composer-picker-search input {
+  min-width: 0;
+  flex: 1;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+}
+
+.composer-picker-search input:focus {
+  outline: 0;
 }
 
 .composer-picker-grid,
@@ -3005,9 +3050,45 @@ img.profile-avatar {
 .composer-emoji-server-list {
   display: grid;
   gap: 12px;
-  max-height: 300px;
+  max-height: min(380px, calc(100vh - 252px));
   overflow: auto;
   padding-right: 2px;
+}
+
+.composer-picker-with-rail {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+
+.composer-picker-rail {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  max-height: min(380px, calc(100vh - 252px));
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  padding-right: 8px;
+}
+
+.composer-picker-rail-item {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 950;
+}
+
+.composer-picker-rail-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .composer-emoji-server-list section {

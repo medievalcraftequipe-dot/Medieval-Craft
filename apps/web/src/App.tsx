@@ -4688,6 +4688,7 @@ function WorkspaceShell({
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [composerPasteMenu, setComposerPasteMenu] = useState<{ x: number; y: number; target: ChatComposerTarget } | null>(null);
   const [composerPicker, setComposerPicker] = useState<{ target: ChatComposerTarget; kind: ComposerPickerKind } | null>(null);
+  const [composerPickerQuery, setComposerPickerQuery] = useState("");
   const [externalLinkPrompt, setExternalLinkPrompt] = useState<{ link: string; risky: boolean } | null>(null);
   const [youtubePlayer, setYoutubePlayer] = useState<{ link: string; videoId: string; title: string } | null>(null);
   const [directContacts, setDirectContacts] = useState<DirectContact[]>(() => initialSavedDirectContacts);
@@ -6457,6 +6458,7 @@ function WorkspaceShell({
   }
 
   function toggleComposerPicker(target: ChatComposerTarget, kind: ComposerPickerKind) {
+    setComposerPickerQuery("");
     setComposerPicker((current) => (current?.target === target && current.kind === kind ? null : { target, kind }));
   }
 
@@ -6479,65 +6481,59 @@ function WorkspaceShell({
       return null;
     }
 
-    const emojiGroups = composerPicker.kind === "emoji" ? getEmojiLibraryGroups("emoji") : [];
-    const gifGroups = composerPicker.kind === "gifs" ? getEmojiLibraryGroups("gifs") : [];
-    const title =
-      composerPicker.kind === "emoji" ? "Emojis" : composerPicker.kind === "stickers" ? "Figurinhas" : "GIFs";
+    const query = composerPickerQuery.trim().toLowerCase();
+    const allEmojiGroups = getEmojiLibraryGroups("emoji");
+    const allGifGroups = getEmojiLibraryGroups("gifs");
+    const filterGroups = (groups: ReturnType<typeof getEmojiLibraryGroups>) =>
+      groups
+        .map((group) => ({
+          ...group,
+          emojis: group.emojis.filter((emoji) => {
+            if (!query) {
+              return true;
+            }
+
+            return emoji.name.toLowerCase().includes(query) || group.server.name.toLowerCase().includes(query);
+          })
+        }))
+        .filter((group) => group.emojis.length > 0);
+    const emojiGroups = filterGroups(allEmojiGroups);
+    const gifGroups = filterGroups(allGifGroups);
+    const quickEmojis = query ? [] : composerEmojiOptions;
+    const quickStickers = query ? [] : composerStickerOptions;
+    const tabLabels: Array<{ kind: ComposerPickerKind; label: string }> = [
+      { kind: "gifs", label: "GIFs" },
+      { kind: "stickers", label: "Figurinha" },
+      { kind: "emoji", label: "Emoji" }
+    ];
+    const groupsForRail = composerPicker.kind === "gifs" ? gifGroups : emojiGroups;
     const emptyText =
       composerPicker.kind === "gifs"
-        ? "Nenhum emoji animado disponivel nos seus servidores."
+        ? "Nenhum GIF animado disponivel nos seus servidores."
         : composerPicker.kind === "stickers"
-        ? "Figurinhas rapidas"
+        ? query
+          ? "Nenhuma figurinha encontrada."
+          : "Figurinhas rapidas"
         : "Nenhum emoji disponivel nos seus servidores.";
 
-    return (
-      <div className="composer-picker" role="dialog" aria-label={title}>
-        <header>
-          <strong>{title}</strong>
-          <button className="mini-action" type="button" title="Fechar" onClick={() => setComposerPicker(null)}>
-            <X size={13} />
-          </button>
-        </header>
-        {composerPicker.kind === "emoji" ? (
-          <>
-            <div className="composer-picker-grid">
-              {composerEmojiOptions.map((emoji) => (
-                <button type="button" key={`emoji-${emoji}`} onClick={() => insertComposerToken(target, emoji)}>
-                  {emoji}
-                </button>
-              ))}
-            </div>
-            {emojiGroups.length ? (
-              <div className="composer-emoji-server-list">
-                {emojiGroups.map((group) => (
-                  <section key={`emoji-server-${group.server.id}`}>
-                    <strong>{group.server.name}</strong>
-                    <div className="composer-media-grid">
-                      {group.emojis.map((emoji) => (
-                        <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
-                          <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            ) : (
-              <p>{emptyText}</p>
-            )}
-          </>
-        ) : composerPicker.kind === "stickers" ? (
-          <div className="composer-picker-grid sticker-grid">
-            {composerStickerOptions.map((sticker) => (
-              <button type="button" key={`sticker-${sticker}`} onClick={() => insertComposerToken(target, sticker)}>
-                {sticker}
-              </button>
-            ))}
-          </div>
-        ) : gifGroups.length ? (
+    const renderServerRail = () =>
+      groupsForRail.length ? (
+        <aside className="composer-picker-rail" aria-label="Servidores com emojis">
+          {groupsForRail.map((group) => (
+            <span className="composer-picker-rail-item" key={`composer-rail-${group.server.id}`} title={group.server.name}>
+              {group.server.iconUrl ? <SafePreviewImage src={group.server.iconUrl} alt="" /> : group.server.initials}
+            </span>
+          ))}
+        </aside>
+      ) : null;
+
+    const renderCustomEmojiGroups = (groups: ReturnType<typeof getEmojiLibraryGroups>) =>
+      groups.length ? (
+        <div className="composer-picker-with-rail">
+          {renderServerRail()}
           <div className="composer-emoji-server-list">
-            {gifGroups.map((group) => (
-              <section key={`gif-server-${group.server.id}`}>
+            {groups.map((group) => (
+              <section key={`${composerPicker.kind}-server-${group.server.id}`}>
                 <strong>{group.server.name}</strong>
                 <div className="composer-media-grid">
                   {group.emojis.map((emoji) => (
@@ -6549,8 +6545,69 @@ function WorkspaceShell({
               </section>
             ))}
           </div>
+        </div>
+      ) : (
+        <p>{emptyText}</p>
+      );
+
+    return (
+      <div className="composer-picker" role="dialog" aria-label="Painel de emojis, figurinhas e GIFs">
+        <header className="composer-picker-tabs">
+          {tabLabels.map((tab) => (
+            <button
+              className={composerPicker.kind === tab.kind ? "active" : ""}
+              key={tab.kind}
+              type="button"
+              onClick={() => {
+                setComposerPicker({ target, kind: tab.kind });
+                setComposerPickerQuery("");
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+          <button className="mini-action" type="button" title="Fechar" onClick={() => setComposerPicker(null)}>
+            <X size={13} />
+          </button>
+        </header>
+        <label className="composer-picker-search">
+          <Search size={17} />
+          <input
+            value={composerPickerQuery}
+            onChange={(event) => setComposerPickerQuery(event.target.value)}
+            placeholder={
+              composerPicker.kind === "gifs"
+                ? "Buscar GIFs do servidor"
+                : composerPicker.kind === "stickers"
+                ? "Buscar figurinhas"
+                : "Buscar emojis do servidor"
+            }
+          />
+        </label>
+        {composerPicker.kind === "emoji" ? (
+          <>
+            {quickEmojis.length ? (
+              <div className="composer-picker-grid frequent-grid" aria-label="Utilizados com frequencia">
+                {quickEmojis.map((emoji) => (
+                  <button type="button" key={`emoji-${emoji}`} onClick={() => insertComposerToken(target, emoji)}>
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {renderCustomEmojiGroups(emojiGroups)}
+          </>
+        ) : composerPicker.kind === "stickers" ? (
+          <div className="composer-picker-grid sticker-grid">
+            {quickStickers.map((sticker) => (
+              <button type="button" key={`sticker-${sticker}`} onClick={() => insertComposerToken(target, sticker)}>
+                {sticker}
+              </button>
+            ))}
+            {!quickStickers.length ? <p>{emptyText}</p> : null}
+          </div>
         ) : (
-          <p>{emptyText}</p>
+          renderCustomEmojiGroups(gifGroups)
         )}
       </div>
     );
@@ -9539,6 +9596,7 @@ function WorkspaceShell({
                     ))}
                   </div>
                 ) : null}
+                {renderComposerPicker("server")}
               </div>
               <button
                 className="send-button"
