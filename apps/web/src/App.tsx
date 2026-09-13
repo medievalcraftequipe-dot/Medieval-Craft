@@ -158,6 +158,7 @@ type InAppUpdateState = "available" | "checking" | "installing" | "restarting" |
 type InviteDurationId = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
 type TimeoutDurationId = "2h" | "5h" | "24h" | "2d" | "1w";
 type ChatComposerTarget = "server" | "direct";
+type ComposerPickerKind = "emoji" | "stickers" | "gifs";
 type ServerAccessMode = "invite" | "request" | "discoverable";
 type ScreenShareQualityId = "144p" | "360p" | "720p" | "1080p" | "2k" | "4k" | "8k";
 type ScreenShareCaptureMode = "screen" | "game";
@@ -176,6 +177,8 @@ const soundboardAudioMaxBytes = 50 * 1024 * 1024;
 const customEmojiMaxBytes = 2 * 1024 * 1024;
 const defaultSoundEmoji = "\u{1F508}";
 const soundEmojiOptions = ["\u{1F508}", "\u{1F3B5}", "\u{1F514}", "\u{26A1}", "\u{1F389}", "\u{1F525}", "\u{1F4A7}", "\u{1F4A5}"];
+const composerEmojiOptions = ["\u{1F600}", "\u{1F602}", "\u{1F60D}", "\u{1F525}", "\u{1F44D}", "\u{1F389}", "\u{1F914}", "\u{1F440}", "\u{1F622}", "\u{1F64F}", "\u{2B50}", "\u{2705}"];
+const composerStickerOptions = ["\u{1F31F}", "\u{1F4AC}", "\u{1F3C6}", "\u{1F3AE}", "\u{1F48E}", "\u{26A0}", "\u{1F4A5}", "\u{2728}"];
 const serverRuleExamples = [
   "Comporte-se e mostre respeito",
   "Nada de spam ou autopromocao",
@@ -345,6 +348,7 @@ type PermissionKey =
   | "kick_members"
   | "ban_members"
   | "moderate_members"
+  | "view_private_channels"
   | "send_messages"
   | "send_messages_in_threads"
   | "create_public_threads"
@@ -961,6 +965,11 @@ const permissionSections: Array<{
   {
     title: "Permissoes de canal de texto",
     permissions: [
+      {
+        key: "view_private_channels",
+        label: "Ver e usar canais privados",
+        description: "Permite visualizar canais privados e participar deles como um canal normal."
+      },
       { key: "send_messages", label: "Enviar mensagens e criar postagens", description: "Permite enviar mensagens em canais de texto e criar postagens." },
       { key: "send_messages_in_threads", label: "Enviar mensagens em topicos e postagens", description: "Permite responder em topicos e postagens." },
       { key: "create_public_threads", label: "Criar topicos publicos", description: "Permite criar topicos que todos podem visualizar." },
@@ -3344,14 +3353,12 @@ function normalizeSavedServer(server: Partial<ServerDefinition>, user: AuthUser)
                 .filter((channel) => channel && (channel.type === "text" || channel.type === "voice"))
                 .map((channel) => {
                   const fallbackName = channel.type === "voice" ? "Geral" : "geral";
-                  const special = channel.special === "rules" ? undefined : channel.special;
                   return {
                     name: normalizeServerStructureName(String(channel.name || fallbackName), fallbackName),
                     type: channel.type,
                     topic: typeof channel.topic === "string" && channel.topic.trim() ? channel.topic.trim().slice(0, 1024) : null,
                     isPrivate: Boolean(channel.isPrivate),
-                    ...(special ? { special } : {}),
-                    isNew: Boolean(channel.isNew),
+                    isNew: Boolean(channel.isNew && !channel.special),
                     slowModeSeconds:
                       typeof channel.slowModeSeconds === "number" && channel.slowModeSeconds > 0
                         ? Math.min(Math.floor(channel.slowModeSeconds), 21600)
@@ -4595,6 +4602,7 @@ function WorkspaceShell({
   const [draft, setDraft] = useState("");
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [composerPasteMenu, setComposerPasteMenu] = useState<{ x: number; y: number; target: ChatComposerTarget } | null>(null);
+  const [composerPicker, setComposerPicker] = useState<{ target: ChatComposerTarget; kind: ComposerPickerKind } | null>(null);
   const [externalLinkPrompt, setExternalLinkPrompt] = useState<{ link: string; risky: boolean } | null>(null);
   const [youtubePlayer, setYoutubePlayer] = useState<{ link: string; videoId: string; title: string } | null>(null);
   const [directContacts, setDirectContacts] = useState<DirectContact[]>(() => initialSavedDirectContacts);
@@ -4833,7 +4841,6 @@ function WorkspaceShell({
         const member = server.members.find((item) => item.id === user.id || item.username === user.username) ?? null;
         return server.ownerId === user.id || memberHasPermission(server, member, "administrator", user.id);
       }));
-  const specialChannels = activeServer ? getAllServerChannels(activeServer).filter((channel) => channel.special && channel.special !== "rules") : [];
   const activeServerBoosts = activeServer ? getActiveBoosts(activeServer.boosts, nowTick) : [];
   const activeServerBoostLevel = getBoostLevel(activeServerBoosts.length);
   const activeServerNextBoostTarget = getNextBoostTarget(activeServerBoosts.length);
@@ -4893,11 +4900,13 @@ function WorkspaceShell({
   const visibleChannelGroups =
     activeServer?.categories.map((group) => ({
       ...group,
-      channels: group.channels.filter((channel) => !channel.special || channel.special === "rules")
+      channels: group.channels.filter((channel) => memberCanAccessChannel(activeServer, activeServerMember, channel, user.id))
     })) ?? [];
   const textChannels = activeServer ? getTextChannels(activeServer) : [];
-  const activeChannelDetails = textChannels.find((channel) => channel.name === activeChannel) ?? textChannels[0];
-  const channelIsPrivate = Boolean(activeChannelDetails?.isPrivate);
+  const visibleTextChannels = textChannels.filter((channel) => memberCanAccessChannel(activeServer, activeServerMember, channel, user.id));
+  const activeChannelDetails = visibleTextChannels.find((channel) => channel.name === activeChannel) ?? visibleTextChannels[0] ?? textChannels[0];
+  const canAccessActiveChannel = memberCanAccessChannel(activeServer, activeServerMember, activeChannelDetails, user.id);
+  const visibleTextChannelNames = visibleTextChannels.map((channel) => channel.name).join("\u0001");
   const activeServerMessages = activeServer
     ? messages.filter(
         (message) =>
@@ -4928,6 +4937,16 @@ function WorkspaceShell({
   const activeDirect = directContacts.find((contact) => contact.id === activeDirectId) ?? null;
   const activeDirectMessages = activeDirect ? directMessages[activeDirect.id] ?? [] : [];
   const canMessageActiveDirect = activeDirect ? activeDirect.isFriend || !activeDirect.blocksNonFriendMessages : false;
+
+  useEffect(() => {
+    if (!activeServer || !visibleTextChannels.length) {
+      return;
+    }
+
+    if (!visibleTextChannels.some((channel) => channel.name === activeChannel)) {
+      setActiveChannel(visibleTextChannels[0].name);
+    }
+  }, [activeServer?.id, activeChannel, visibleTextChannelNames]);
   const activeDirectStatus = activeDirect
     ? activeDirect.isFriend
       ? "Amigos"
@@ -6275,6 +6294,91 @@ function WorkspaceShell({
     setDirectDraftAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
+  function toggleComposerPicker(target: ChatComposerTarget, kind: ComposerPickerKind) {
+    setComposerPicker((current) => (current?.target === target && current.kind === kind ? null : { target, kind }));
+  }
+
+  function appendComposerText(target: ChatComposerTarget, value: string) {
+    if (target === "server") {
+      setDraft((current) => `${current}${current && !current.endsWith(" ") ? " " : ""}${value}`);
+      return;
+    }
+
+    setDirectDraft((current) => `${current}${current && !current.endsWith(" ") ? " " : ""}${value}`);
+  }
+
+  function insertComposerToken(target: ChatComposerTarget, value: string) {
+    appendComposerText(target, value);
+    setComposerPicker(null);
+  }
+
+  function renderComposerPicker(target: ChatComposerTarget) {
+    if (!composerPicker || composerPicker.target !== target) {
+      return null;
+    }
+
+    const customEmojis = target === "server" ? activeServer?.expressions.customEmojis ?? [] : [];
+    const staticCustomEmojis = customEmojis.filter((emoji) => !emoji.animated);
+    const animatedCustomEmojis = customEmojis.filter((emoji) => emoji.animated);
+    const title =
+      composerPicker.kind === "emoji" ? "Emojis" : composerPicker.kind === "stickers" ? "Figurinhas" : "GIFs";
+    const emptyText =
+      composerPicker.kind === "gifs"
+        ? "Nenhum emoji animado salvo neste servidor."
+        : composerPicker.kind === "stickers"
+        ? "Figurinhas rapidas"
+        : "Emojis rapidos";
+
+    return (
+      <div className="composer-picker" role="dialog" aria-label={title}>
+        <header>
+          <strong>{title}</strong>
+          <button className="mini-action" type="button" title="Fechar" onClick={() => setComposerPicker(null)}>
+            <X size={13} />
+          </button>
+        </header>
+        {composerPicker.kind === "emoji" ? (
+          <>
+            <div className="composer-picker-grid">
+              {composerEmojiOptions.map((emoji) => (
+                <button type="button" key={`emoji-${emoji}`} onClick={() => insertComposerToken(target, emoji)}>
+                  {emoji}
+                </button>
+              ))}
+            </div>
+            {staticCustomEmojis.length ? (
+              <div className="composer-media-grid">
+                {staticCustomEmojis.map((emoji) => (
+                  <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
+                    <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : composerPicker.kind === "stickers" ? (
+          <div className="composer-picker-grid sticker-grid">
+            {composerStickerOptions.map((sticker) => (
+              <button type="button" key={`sticker-${sticker}`} onClick={() => insertComposerToken(target, sticker)}>
+                {sticker}
+              </button>
+            ))}
+          </div>
+        ) : animatedCustomEmojis.length ? (
+          <div className="composer-media-grid">
+            {animatedCustomEmojis.map((emoji) => (
+              <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
+                <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p>{emptyText}</p>
+        )}
+      </div>
+    );
+  }
+
   function shouldSubmitOnEnter(event: KeyboardEvent<HTMLInputElement>) {
     return event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing;
   }
@@ -6314,8 +6418,10 @@ function WorkspaceShell({
       return;
     }
 
-    if ((!text && !attachments.length) || channelIsPrivate || !canSendServerMessages) {
-      if (text && !canSendServerMessages) {
+    if ((!text && !attachments.length) || !canAccessActiveChannel || !canSendServerMessages) {
+      if ((text || attachments.length) && !canAccessActiveChannel) {
+        setServerNotice("Este canal privado exige um cargo com permissao para ver e usar canais privados.");
+      } else if (text && !canSendServerMessages) {
         setServerNotice("Seu cargo nao permite enviar mensagens neste servidor.");
       }
       return;
@@ -6455,10 +6561,15 @@ function WorkspaceShell({
   }
 
   function selectChannel(channel: ChannelDefinition) {
+    if (!memberCanAccessChannel(activeServer, activeServerMember, channel, user.id)) {
+      setServerNotice("Este canal privado exige um cargo com permissao para acessar.");
+      return;
+    }
+
     if (channel.type === "voice") {
       if (!canConnectVoice) {
         setServerNotice("Seu cargo nao permite conectar em canais de voz.");
-      } else if (!channel.isPrivate) {
+      } else {
         setServerGuideOpen(false);
         setVoiceChannel(channel.name);
         setVoiceConnectedAt((current) => (voiceChannel === channel.name && current ? current : Date.now()));
@@ -6585,7 +6696,7 @@ function WorkspaceShell({
     if (channel.type === "text") {
       setServerGuideOpen(false);
       setActiveChannel(channel.name);
-    } else if (!channel.isPrivate) {
+    } else if (memberCanAccessChannel(activeServer, activeServerMember, channel, user.id)) {
       setServerGuideOpen(false);
       setVoiceChannel(channel.name);
     }
@@ -8438,36 +8549,6 @@ function WorkspaceShell({
                   <span>Apoiar com Estrelas</span>
                 </button>
               </section>
-              {specialChannels.length ? (
-                <section className="channel-group special-channel-group">
-                  {specialChannels.map((channel) => (
-                    (() => {
-                      const channelMentionCount = unreadMentionCountsByChannel.get(`${activeServer.id}:${channel.name}`) ?? 0;
-                      return (
-                        <button
-                          key={`special-${channel.special}-${channel.name}`}
-                          className={[
-                            "channel",
-                            "special-channel",
-                            activeChannel === channel.name && channel.type === "text" ? "active" : "",
-                            channel.isPrivate ? "private" : ""
-                          ]
-                            .filter(Boolean)
-                            .join(" ")}
-                          onClick={() => selectChannel(channel)}
-                          type="button"
-                          title={channel.isPrivate ? "Canal privado da comunidade" : "Canal da comunidade"}
-                        >
-                          {channel.special === "rules" ? <BookOpen size={16} /> : <ShieldCheck size={16} />}
-                          <span>{channel.name}</span>
-                          {channelMentionCount ? <small className="mention-badge">{channelMentionCount}</small> : null}
-                          {channel.isNew ? <small className="new-badge">NOVO</small> : null}
-                        </button>
-                      );
-                    })()
-                  ))}
-                </section>
-              ) : null}
               {visibleChannelGroups.map((group) => (
                 <section
                   key={group.name}
@@ -9039,15 +9120,29 @@ function WorkspaceShell({
               >
                 <Paperclip size={18} />
               </button>
-              <input
-                value={directDraft}
-                onChange={(event) => setDirectDraft(event.target.value)}
-                onPaste={(event) => handleChatPaste(event, "direct")}
-                onContextMenu={(event) => handleComposerContextMenu(event, "direct")}
-                onKeyDown={submitDirectMessageOnEnter}
-                disabled={!activeDirect || !canMessageActiveDirect}
-                placeholder={!activeDirect ? "Abra uma DM pelo nick" : !canMessageActiveDirect ? "DM bloqueada para nao amigos" : `Mensagem para @${activeDirect.username}`}
-              />
+              <div className="composer-input-wrap">
+                <input
+                  value={directDraft}
+                  onChange={(event) => setDirectDraft(event.target.value)}
+                  onPaste={(event) => handleChatPaste(event, "direct")}
+                  onContextMenu={(event) => handleComposerContextMenu(event, "direct")}
+                  onKeyDown={submitDirectMessageOnEnter}
+                  disabled={!activeDirect || !canMessageActiveDirect}
+                  placeholder={!activeDirect ? "Abra uma DM pelo nick" : !canMessageActiveDirect ? "DM bloqueada para nao amigos" : `Mensagem para @${activeDirect.username}`}
+                />
+                <div className="composer-tools" aria-label="Recursos da mensagem">
+                  <button type="button" title="GIFs" disabled={!activeDirect || !canMessageActiveDirect} onClick={() => toggleComposerPicker("direct", "gifs")}>
+                    GIF
+                  </button>
+                  <button type="button" title="Emojis" disabled={!activeDirect || !canMessageActiveDirect} onClick={() => toggleComposerPicker("direct", "emoji")}>
+                    <Sparkles size={16} />
+                  </button>
+                  <button type="button" title="Figurinhas" disabled={!activeDirect || !canMessageActiveDirect} onClick={() => toggleComposerPicker("direct", "stickers")}>
+                    <ImageIcon size={16} />
+                  </button>
+                </div>
+                {renderComposerPicker("direct")}
+              </div>
               <button
                 className="send-button"
                 title="Enviar mensagem direta"
@@ -9228,9 +9323,9 @@ function WorkspaceShell({
                   onPaste={(event) => handleChatPaste(event, "server")}
                   onContextMenu={(event) => handleComposerContextMenu(event, "server")}
                   onKeyDown={submitServerMessageOnEnter}
-                  disabled={channelIsPrivate || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)}
+                  disabled={!canAccessActiveChannel || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)}
                   placeholder={
-                    channelIsPrivate
+                    !canAccessActiveChannel
                       ? "Canal privado"
                       : activeMemberTimeoutNotice
                       ? activeMemberTimeoutNotice
@@ -9239,6 +9334,17 @@ function WorkspaceShell({
                       : `Conversar em #${activeChannel}`
                   }
                 />
+                <div className="composer-tools" aria-label="Recursos da mensagem">
+                  <button type="button" title="GIFs" disabled={!canAccessActiveChannel || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)} onClick={() => toggleComposerPicker("server", "gifs")}>
+                    GIF
+                  </button>
+                  <button type="button" title="Emojis" disabled={!canAccessActiveChannel || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)} onClick={() => toggleComposerPicker("server", "emoji")}>
+                    <Sparkles size={16} />
+                  </button>
+                  <button type="button" title="Figurinhas" disabled={!canAccessActiveChannel || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)} onClick={() => toggleComposerPicker("server", "stickers")}>
+                    <ImageIcon size={16} />
+                  </button>
+                </div>
                 {serverMentionOptions.length ? (
                   <div className="mention-autocomplete" role="listbox" aria-label="Sugestoes de mencao">
                     {serverMentionOptions.map((member) => (
@@ -9263,7 +9369,7 @@ function WorkspaceShell({
                 className="send-button"
                 title="Enviar mensagem"
                 type="button"
-                disabled={channelIsPrivate || !canSendServerMessages || Boolean(activeMemberTimeoutNotice) || (!draft.trim() && !draftAttachments.length)}
+                disabled={!canAccessActiveChannel || !canSendServerMessages || Boolean(activeMemberTimeoutNotice) || (!draft.trim() && !draftAttachments.length)}
                 onClick={() => void sendMessage()}
               >
                 <Send size={18} />
@@ -10151,12 +10257,10 @@ function convertDiscordChannels(channels: DiscordChannel[], guild: DiscordSerial
         ? uniqueImportedName(normalizeDiscordTextChannelName(channel.name || "canal"), usedTextNames)
         : uniqueImportedName(normalizeVoiceChannelName(channel.name || "Canal de voz"), usedVoiceNames);
     const special = channelKind === "text" ? getDiscordSpecialChannel(channel, guild, channelName) : undefined;
-    const pinnedSpecial = special === "rules" ? undefined : special;
     const importedChannel: ChannelDefinition = {
       name: channelName,
       type: channelKind,
-      userLimit: channelKind === "voice" && typeof channel.user_limit === "number" && channel.user_limit > 0 ? channel.user_limit : null,
-      ...(pinnedSpecial ? { special: pinnedSpecial, isNew: true } : {})
+      userLimit: channelKind === "voice" && typeof channel.user_limit === "number" && channel.user_limit > 0 ? channel.user_limit : null
     };
     const parentGroup = channel.parent_id ? categoryById.get(channel.parent_id) : null;
 
@@ -10997,6 +11101,14 @@ function memberHasPermission(server: ServerDefinition | null, member: ServerMemb
 
   const permissions = getRolePermissions(server, member);
   return Boolean(permissions.administrator || permissions[permission]);
+}
+
+function memberCanAccessChannel(server: ServerDefinition | null, member: ServerMemberDefinition | null, channel: ChannelDefinition | null | undefined, userId: string) {
+  if (!channel?.isPrivate) {
+    return true;
+  }
+
+  return memberHasPermission(server, member, "view_private_channels", userId);
 }
 
 function getPresenceLabel(status: PresenceStatus) {
@@ -13420,17 +13532,12 @@ function ServerSettingsDialog({
     isPrivate: boolean
   ) {
     let found = false;
-    const shouldPin = special !== "rules";
     const nextCategories = categories.map((group) => ({
       ...group,
       channels: group.channels.map((channel) => {
         const clearsSameSlot = channel.special === special;
         if (channel.name === channelName && channel.type === "text") {
           found = true;
-          if (shouldPin) {
-            return { ...channel, special, isPrivate: isPrivate || channel.isPrivate, isNew: true };
-          }
-
           const { special: _special, isNew: _isNew, ...plainChannel } = channel;
           return { ...plainChannel, isPrivate: isPrivate || channel.isPrivate };
         }
@@ -13460,8 +13567,7 @@ function ServerSettingsDialog({
       return { categories: marked.categories, channelName };
     }
 
-    const channel: ChannelDefinition =
-      special === "rules" ? { name: channelName, type: "text", isPrivate } : { name: channelName, type: "text", isPrivate, special, isNew: true };
+    const channel: ChannelDefinition = { name: channelName, type: "text", isPrivate };
     const textGroupIndex = marked.categories.findIndex((group) => group.name === "CANAIS DE TEXTO");
     if (textGroupIndex === -1) {
       return { categories: [{ name: "CANAIS DE TEXTO", channels: [channel] }, ...marked.categories], channelName };
