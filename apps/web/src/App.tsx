@@ -6060,27 +6060,99 @@ function WorkspaceShell({
     );
   }
 
+  function getEmojiLibraryGroups(kind: "emoji" | "gifs") {
+    return servers
+      .filter((server) => server.members.some((member) => member.id === user.id || member.username === user.username))
+      .map((server) => ({
+        server,
+        emojis: (server.expressions.customEmojis ?? []).filter((emoji) => (kind === "gifs" ? emoji.animated : !emoji.animated))
+      }))
+      .filter((group) => group.emojis.length > 0);
+  }
+
+  function findAvailableCustomEmoji(name: string) {
+    const normalizedName = normalizeEmojiName(name);
+    if (!normalizedName) {
+      return null;
+    }
+
+    for (const server of servers) {
+      const isMember = server.members.some((member) => member.id === user.id || member.username === user.username);
+      if (!isMember || !server.expressions.emojiEnabled) {
+        continue;
+      }
+
+      const emoji = (server.expressions.customEmojis ?? []).find((item) => item.name.toLowerCase() === normalizedName.toLowerCase());
+      if (emoji) {
+        return { server, emoji };
+      }
+    }
+
+    return null;
+  }
+
+  function renderCustomEmojisInText(text: string, keyPrefix: string) {
+    const parts: ReactNode[] = [];
+    const emojiPattern = /:([a-zA-Z0-9_]{2,32}):/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = emojiPattern.exec(text))) {
+      if (match.index > lastIndex) {
+        parts.push(text.slice(lastIndex, match.index));
+      }
+
+      const rawToken = match[0];
+      const found = findAvailableCustomEmoji(match[1]);
+      if (found) {
+        parts.push(
+          <span className="message-custom-emoji" title={`${found.server.name} - :${found.emoji.name}:`} key={`${keyPrefix}-${match.index}-${found.emoji.id}`}>
+            <SafePreviewImage src={found.emoji.imageUrl} alt={`:${found.emoji.name}:`} />
+          </span>
+        );
+      } else {
+        parts.push(rawToken);
+      }
+
+      lastIndex = match.index + rawToken.length;
+    }
+
+    if (lastIndex < text.length) {
+      parts.push(text.slice(lastIndex));
+    }
+
+    return parts.length ? parts : [text];
+  }
+
+  function renderCustomEmojisInNodes(nodes: ReactNode | ReactNode[], keyPrefix: string) {
+    const list = Array.isArray(nodes) ? nodes : [nodes];
+    return list.flatMap((node, index) =>
+      typeof node === "string" ? renderCustomEmojisInText(node, `${keyPrefix}-${index}`) : [node]
+    );
+  }
+
   function renderDirectMessageText(text: string) {
-    return renderExternalLinksInNodes(
-      renderInviteLinksInText(text, (inviteLink, key) => (
-        <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-          {inviteLink}
-        </button>
-      )),
+    const inviteNodes = renderInviteLinksInText(text, (inviteLink, key) => (
+      <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
+        {inviteLink}
+      </button>
+    ));
+
+    return renderCustomEmojisInNodes(
+      renderExternalLinksInNodes(inviteNodes, "direct-message-link"),
       "direct-message-link"
     );
   }
 
   function renderServerMessageText(message: LocalMessage, rawText = message.text) {
     if (!activeServer) {
-      return renderExternalLinksInNodes(
-        renderInviteLinksInText(rawText, (inviteLink, key) => (
-          <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-            {inviteLink}
-          </button>
-        )),
-        "server-message-link"
-      );
+      const inviteNodes = renderInviteLinksInText(rawText, (inviteLink, key) => (
+        <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
+          {inviteLink}
+        </button>
+      ));
+
+      return renderCustomEmojisInNodes(renderExternalLinksInNodes(inviteNodes, "server-message-link"), "server-message-link");
     }
 
     const parts: ReactNode[] = [];
@@ -6148,7 +6220,8 @@ function WorkspaceShell({
       parts.push(rawText.slice(lastIndex));
     }
 
-    return renderExternalLinksInNodes(parts.length ? parts : rawText, `server-message-${message.id ?? message.time}`);
+    const renderedLinks = renderExternalLinksInNodes(parts.length ? parts : rawText, `server-message-${message.id ?? message.time}`);
+    return renderCustomEmojisInNodes(renderedLinks, `server-message-${message.id ?? message.time}`);
   }
 
   function renderServerNoticeText(text: string) {
@@ -6354,17 +6427,16 @@ function WorkspaceShell({
       return null;
     }
 
-    const customEmojis = target === "server" ? activeServer?.expressions.customEmojis ?? [] : [];
-    const staticCustomEmojis = customEmojis.filter((emoji) => !emoji.animated);
-    const animatedCustomEmojis = customEmojis.filter((emoji) => emoji.animated);
+    const emojiGroups = composerPicker.kind === "emoji" ? getEmojiLibraryGroups("emoji") : [];
+    const gifGroups = composerPicker.kind === "gifs" ? getEmojiLibraryGroups("gifs") : [];
     const title =
       composerPicker.kind === "emoji" ? "Emojis" : composerPicker.kind === "stickers" ? "Figurinhas" : "GIFs";
     const emptyText =
       composerPicker.kind === "gifs"
-        ? "Nenhum emoji animado salvo neste servidor."
+        ? "Nenhum emoji animado disponivel nos seus servidores."
         : composerPicker.kind === "stickers"
         ? "Figurinhas rapidas"
-        : "Emojis rapidos";
+        : "Nenhum emoji disponivel nos seus servidores.";
 
     return (
       <div className="composer-picker" role="dialog" aria-label={title}>
@@ -6383,15 +6455,24 @@ function WorkspaceShell({
                 </button>
               ))}
             </div>
-            {staticCustomEmojis.length ? (
-              <div className="composer-media-grid">
-                {staticCustomEmojis.map((emoji) => (
-                  <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
-                    <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
-                  </button>
+            {emojiGroups.length ? (
+              <div className="composer-emoji-server-list">
+                {emojiGroups.map((group) => (
+                  <section key={`emoji-server-${group.server.id}`}>
+                    <strong>{group.server.name}</strong>
+                    <div className="composer-media-grid">
+                      {group.emojis.map((emoji) => (
+                        <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
+                          <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
+                        </button>
+                      ))}
+                    </div>
+                  </section>
                 ))}
               </div>
-            ) : null}
+            ) : (
+              <p>{emptyText}</p>
+            )}
           </>
         ) : composerPicker.kind === "stickers" ? (
           <div className="composer-picker-grid sticker-grid">
@@ -6401,12 +6482,19 @@ function WorkspaceShell({
               </button>
             ))}
           </div>
-        ) : animatedCustomEmojis.length ? (
-          <div className="composer-media-grid">
-            {animatedCustomEmojis.map((emoji) => (
-              <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
-                <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
-              </button>
+        ) : gifGroups.length ? (
+          <div className="composer-emoji-server-list">
+            {gifGroups.map((group) => (
+              <section key={`gif-server-${group.server.id}`}>
+                <strong>{group.server.name}</strong>
+                <div className="composer-media-grid">
+                  {group.emojis.map((emoji) => (
+                    <button type="button" key={emoji.id} title={`:${emoji.name}:`} onClick={() => insertComposerToken(target, `:${emoji.name}:`)}>
+                      <SafePreviewImage src={emoji.imageUrl} alt={emoji.name} />
+                    </button>
+                  ))}
+                </div>
+              </section>
             ))}
           </div>
         ) : (
