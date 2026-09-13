@@ -3047,6 +3047,56 @@ img.profile-avatar {
   gap: 6px;
 }
 
+.composer-online-gifs {
+  display: grid;
+  gap: 8px;
+}
+
+.composer-online-gifs header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.composer-online-gifs header span {
+  font-size: 0.66rem;
+  font-weight: 950;
+  letter-spacing: 0;
+}
+
+.online-gif-grid {
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  max-height: 224px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+.online-gif-grid::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.online-gif-grid button {
+  aspect-ratio: 1.25;
+}
+
+.composer-load-more {
+  min-height: 34px;
+  border-radius: 7px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.composer-load-more:hover {
+  background: color-mix(in srgb, var(--accent), transparent 74%);
+}
+
 .composer-emoji-server-list {
   display: grid;
   gap: 12px;

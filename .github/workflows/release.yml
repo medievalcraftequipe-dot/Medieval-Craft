@@ -67,6 +67,7 @@ jobs:
         shell: pwsh
         env:
           TEMPEST_LIGHT_GITHUB_REPOSITORY: ${{ github.repository }}
+          VITE_TEMPEST_LIGHT_GIPHY_API_KEY: ${{ secrets.VITE_TEMPEST_LIGHT_GIPHY_API_KEY }}
         run: pnpm --filter "./apps/desktop" build:installer:windows
 
       - name: Publicar Release

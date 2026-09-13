@@ -100,6 +100,7 @@ const WORKSPACE_STATE_PREFIX = "tempestLight.workspace";
 const MENTION_NOTIFICATIONS_KEY = "tempestLight.mentionNotifications";
 const LOCAL_PROFILE_IMAGES_PREFIX = "tempestLight.localProfileImages";
 const LOCAL_DEVELOPER_TOOLS_ENABLED = import.meta.env.VITE_ENABLE_LOCAL_DEVELOPER_TOOLS === "true";
+const GIPHY_API_KEY = String(import.meta.env.VITE_TEMPEST_LIGHT_GIPHY_API_KEY || import.meta.env.VITE_GIPHY_API_KEY || "").trim();
 const termsOfUseSections = [
   {
     title: "1. Conta e acesso",
@@ -210,6 +211,7 @@ const maxUserStarBalance = 999_999_999;
 const youtubeHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$/i;
 const trustedMediaHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$|(^|\.)twitch\.tv$/i;
 const giphyHostPattern = /(^|\.)giphy\.com$|(^|\.)media\.giphy\.com$|(^|\.)i\.giphy\.com$/i;
+const externalGifSearchLimit = 24;
 const dangerousFileExtensionPattern = /\.(?:exe|msi|bat|cmd|ps1|scr|vbs|jar|com|pif|apk|dll|reg|lnk|iso|img|app|dmg)(?:[?#].*)?$/i;
 const imageFileNamePattern = /\.(?:png|jpe?g|gif|webp|avif)$/i;
 const youtubePreviewTitleCache = new Map<string, string>();
@@ -791,6 +793,13 @@ interface ChatAttachment {
   mimeType: string;
   url: string;
   sizeBytes: number;
+}
+
+interface ExternalGifResult {
+  id: string;
+  title: string;
+  previewUrl: string;
+  gifUrl: string;
 }
 
 interface VoiceSoundEffectEvent {
@@ -3280,6 +3289,75 @@ function getSafeAttachmentMimeType(file: File) {
   return "application/octet-stream";
 }
 
+function normalizeGiphyGif(value: unknown): ExternalGifResult | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const item = value as {
+    id?: unknown;
+    title?: unknown;
+    slug?: unknown;
+    images?: Record<string, { url?: unknown; webp?: unknown; size?: unknown } | undefined>;
+  };
+  const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : typeof item.slug === "string" ? item.slug.trim() : "";
+  const title = typeof item.title === "string" && item.title.trim() ? item.title.trim().slice(0, 80) : "GIF";
+  const gifUrl = sanitizeImageSource(
+    typeof item.images?.downsized_medium?.url === "string"
+      ? item.images.downsized_medium.url
+      : typeof item.images?.fixed_width?.url === "string"
+      ? item.images.fixed_width.url
+      : typeof item.images?.original?.url === "string"
+      ? item.images.original.url
+      : null
+  );
+  const previewUrl = sanitizeImageSource(
+    typeof item.images?.fixed_width_small?.url === "string"
+      ? item.images.fixed_width_small.url
+      : typeof item.images?.fixed_width_small?.webp === "string"
+      ? item.images.fixed_width_small.webp
+      : gifUrl
+  );
+
+  if (!id || !gifUrl || !previewUrl) {
+    return null;
+  }
+
+  return { id, title, previewUrl, gifUrl };
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+async function searchExternalGifs(query: string, offset: number, signal?: AbortSignal) {
+  if (!GIPHY_API_KEY) {
+    return [];
+  }
+
+  const trimmedQuery = query.trim();
+  const endpoint = trimmedQuery ? "https://api.giphy.com/v1/gifs/search" : "https://api.giphy.com/v1/gifs/trending";
+  const url = new URL(endpoint);
+  url.searchParams.set("api_key", GIPHY_API_KEY);
+  url.searchParams.set("limit", String(externalGifSearchLimit));
+  url.searchParams.set("offset", String(Math.max(0, offset)));
+  url.searchParams.set("rating", "pg-13");
+  url.searchParams.set("lang", "pt");
+  if (trimmedQuery) {
+    url.searchParams.set("q", trimmedQuery);
+  }
+
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    throw new Error("Nao consegui pesquisar GIFs agora.");
+  }
+
+  const payload = await response.json() as { data?: unknown[] };
+  return (Array.isArray(payload.data) ? payload.data : [])
+    .map((item) => normalizeGiphyGif(item))
+    .filter((item): item is ExternalGifResult => Boolean(item));
+}
+
 async function readChatAttachment(file: File): Promise<ChatAttachment> {
   if (file.size > chatAttachmentMaxBytes) {
     throw new Error("Arquivo grande demais. O limite planejado do chat e 3 GB por arquivo.");
@@ -4689,6 +4767,11 @@ function WorkspaceShell({
   const [composerPasteMenu, setComposerPasteMenu] = useState<{ x: number; y: number; target: ChatComposerTarget } | null>(null);
   const [composerPicker, setComposerPicker] = useState<{ target: ChatComposerTarget; kind: ComposerPickerKind } | null>(null);
   const [composerPickerQuery, setComposerPickerQuery] = useState("");
+  const [externalGifResults, setExternalGifResults] = useState<ExternalGifResult[]>([]);
+  const [externalGifStatus, setExternalGifStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [externalGifError, setExternalGifError] = useState<string | null>(null);
+  const [externalGifOffset, setExternalGifOffset] = useState(0);
+  const [externalGifHasMore, setExternalGifHasMore] = useState(false);
   const [externalLinkPrompt, setExternalLinkPrompt] = useState<{ link: string; risky: boolean } | null>(null);
   const [youtubePlayer, setYoutubePlayer] = useState<{ link: string; videoId: string; title: string } | null>(null);
   const [directContacts, setDirectContacts] = useState<DirectContact[]>(() => initialSavedDirectContacts);
@@ -4750,6 +4833,31 @@ function WorkspaceShell({
 
   serversRef.current = servers;
   userRef.current = user;
+
+  useEffect(() => {
+    if (composerPicker?.kind !== "gifs") {
+      return undefined;
+    }
+
+    if (!GIPHY_API_KEY) {
+      setExternalGifResults([]);
+      setExternalGifOffset(0);
+      setExternalGifHasMore(false);
+      setExternalGifStatus("idle");
+      setExternalGifError("Configure a chave VITE_TEMPEST_LIGHT_GIPHY_API_KEY para pesquisar GIFs online.");
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void loadExternalGifResults(composerPickerQuery, 0, false, controller.signal);
+    }, composerPickerQuery.trim() ? 300 : 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [composerPicker?.kind, composerPicker?.target, composerPickerQuery]);
 
   useEffect(() => {
     if (!api) {
@@ -6289,6 +6397,74 @@ function WorkspaceShell({
     return serverNotice ? <p className="server-notice-line">{renderServerNoticeText(serverNotice)}</p> : null;
   }
 
+  async function loadExternalGifResults(query: string, offset = 0, append = false, signal?: AbortSignal) {
+    if (!GIPHY_API_KEY) {
+      setExternalGifResults([]);
+      setExternalGifOffset(0);
+      setExternalGifHasMore(false);
+      setExternalGifStatus("idle");
+      setExternalGifError("Configure a chave VITE_TEMPEST_LIGHT_GIPHY_API_KEY para pesquisar GIFs online.");
+      return;
+    }
+
+    setExternalGifStatus("loading");
+    setExternalGifError(null);
+
+    try {
+      const results = await searchExternalGifs(query, offset, signal);
+      setExternalGifResults((current) => {
+        if (!append) {
+          return results;
+        }
+
+        const seen = new Set(current.map((item) => item.id));
+        return [...current, ...results.filter((item) => !seen.has(item.id))];
+      });
+      setExternalGifOffset(offset + results.length);
+      setExternalGifHasMore(results.length >= externalGifSearchLimit);
+      setExternalGifStatus("idle");
+    } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
+
+      setExternalGifStatus("error");
+      setExternalGifError(error instanceof Error ? error.message : "Nao consegui pesquisar GIFs agora.");
+      if (!append) {
+        setExternalGifResults([]);
+        setExternalGifOffset(0);
+        setExternalGifHasMore(false);
+      }
+    }
+  }
+
+  function addExternalGifToComposer(target: ChatComposerTarget, gif: ExternalGifResult) {
+    if (target === "server" && !canAttachFiles) {
+      setServerNotice("Seu cargo nao permite anexar GIFs neste servidor.");
+      return;
+    }
+
+    const attachment: ChatAttachment = {
+      id: `gif-${gif.id}-${Date.now()}`,
+      kind: "image",
+      name: gif.title || "GIF",
+      mimeType: "image/gif",
+      url: gif.gifUrl,
+      sizeBytes: 0
+    };
+
+    if (target === "server") {
+      setDraftAttachments((current) => [...current, attachment].slice(0, 4));
+      setServerNotice(null);
+    } else {
+      setDirectDraftAttachments((current) => [...current, attachment].slice(0, 4));
+      setDirectNotice(null);
+    }
+
+    setComposerPicker(null);
+    setComposerPickerQuery("");
+  }
+
   async function addChatAttachments(files: File[], target: ChatComposerTarget) {
     const blockedFile = files.find(isDangerousAttachmentFile);
     if (blockedFile) {
@@ -6527,7 +6703,7 @@ function WorkspaceShell({
         </aside>
       ) : null;
 
-    const renderCustomEmojiGroups = (groups: ReturnType<typeof getEmojiLibraryGroups>) =>
+    const renderCustomEmojiGroups = (groups: ReturnType<typeof getEmojiLibraryGroups>, fallbackText: string | null = emptyText) =>
       groups.length ? (
         <div className="composer-picker-with-rail">
           {renderServerRail()}
@@ -6546,9 +6722,45 @@ function WorkspaceShell({
             ))}
           </div>
         </div>
+      ) : fallbackText ? (
+        <p>{fallbackText}</p>
       ) : (
-        <p>{emptyText}</p>
+        null
       );
+    const renderExternalGifResults = () => {
+      if (composerPicker.kind !== "gifs") {
+        return null;
+      }
+
+      return (
+        <section className="composer-online-gifs" aria-label="GIFs online">
+          <header>
+            <strong>GIFs online</strong>
+            <span>GIPHY</span>
+          </header>
+          {externalGifResults.length ? (
+            <div className="composer-media-grid online-gif-grid">
+              {externalGifResults.map((gif) => (
+                <button type="button" key={gif.id} title={gif.title} onClick={() => addExternalGifToComposer(target, gif)}>
+                  <SafePreviewImage src={gif.previewUrl} alt={gif.title} />
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {externalGifStatus === "loading" ? <p>Buscando GIFs...</p> : null}
+          {externalGifError && externalGifStatus !== "loading" ? <p>{externalGifError}</p> : null}
+          {externalGifHasMore && externalGifStatus !== "loading" ? (
+            <button
+              className="composer-load-more"
+              type="button"
+              onClick={() => void loadExternalGifResults(composerPickerQuery, externalGifOffset, true)}
+            >
+              Mais GIFs
+            </button>
+          ) : null}
+        </section>
+      );
+    };
 
     return (
       <div className="composer-picker" role="dialog" aria-label="Painel de emojis, figurinhas e GIFs">
@@ -6577,7 +6789,7 @@ function WorkspaceShell({
             onChange={(event) => setComposerPickerQuery(event.target.value)}
             placeholder={
               composerPicker.kind === "gifs"
-                ? "Buscar GIFs do servidor"
+                ? "Pesquisar GIFs"
                 : composerPicker.kind === "stickers"
                 ? "Buscar figurinhas"
                 : "Buscar emojis do servidor"
@@ -6607,7 +6819,10 @@ function WorkspaceShell({
             {!quickStickers.length ? <p>{emptyText}</p> : null}
           </div>
         ) : (
-          renderCustomEmojiGroups(gifGroups)
+          <>
+            {renderExternalGifResults()}
+            {renderCustomEmojiGroups(gifGroups, externalGifResults.length || externalGifStatus === "loading" || externalGifError ? null : emptyText)}
+          </>
         )}
       </div>
     );
