@@ -209,6 +209,7 @@ const trustedMediaHostPattern = /(^|\.)youtu\.be$|(^|\.)youtube\.com$|(^|\.)twit
 const giphyHostPattern = /(^|\.)giphy\.com$|(^|\.)media\.giphy\.com$|(^|\.)i\.giphy\.com$/i;
 const dangerousFileExtensionPattern = /\.(?:exe|msi|bat|cmd|ps1|scr|vbs|jar|com|pif|apk|dll|reg|lnk|iso|img|app|dmg)(?:[?#].*)?$/i;
 const imageFileNamePattern = /\.(?:png|jpe?g|gif|webp|avif)$/i;
+const youtubePreviewTitleCache = new Map<string, string>();
 const screenShareQualities: Array<{ id: ScreenShareQualityId; label: string; width: number; height: number }> = [
   { id: "144p", label: "144p", width: 256, height: 144 },
   { id: "360p", label: "360p", width: 640, height: 360 },
@@ -3122,9 +3123,12 @@ function getYoutubeVideoId(link: string) {
   }
 }
 
-function getYoutubePreviewTitle(link: string) {
-  const videoId = getYoutubeVideoId(link);
-  return videoId ? "Abrir video no YouTube" : "YouTube";
+function getYoutubeEmbedUrl(videoId: string) {
+  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0`;
+}
+
+function getYoutubeOEmbedUrl(link: string) {
+  return `https://www.youtube.com/oembed?url=${encodeURIComponent(link)}&format=json`;
 }
 
 function looksLikeImageLink(link: string) {
@@ -4592,6 +4596,7 @@ function WorkspaceShell({
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [composerPasteMenu, setComposerPasteMenu] = useState<{ x: number; y: number; target: ChatComposerTarget } | null>(null);
   const [externalLinkPrompt, setExternalLinkPrompt] = useState<{ link: string; risky: boolean } | null>(null);
+  const [youtubePlayer, setYoutubePlayer] = useState<{ link: string; videoId: string; title: string } | null>(null);
   const [directContacts, setDirectContacts] = useState<DirectContact[]>(() => initialSavedDirectContacts);
   const [activeDirectId, setActiveDirectId] = useState<string | null>(
     () => savedWorkspaceState?.activeDirectId ?? initialSavedDirectContacts[0]?.id ?? null
@@ -5956,21 +5961,70 @@ function WorkspaceShell({
     setMentionInboxOpen(false);
   }
 
+  function renderExternalLinksInText(text: string, keyPrefix: string): ReactNode[] {
+    const parts: ReactNode[] = [];
+    const linkPattern = /https?:\/\/[^\s<>"']+/giu;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = linkPattern.exec(text))) {
+      if (match.index > lastIndex) {
+        parts.push(text.slice(lastIndex, match.index));
+      }
+
+      const rawLink = match[0];
+      const { inviteLink: cleanLink, trailing } = splitTrailingInvitePunctuation(rawLink);
+      if (isSafeHttpUrl(cleanLink) && !isTempestInviteLink(cleanLink)) {
+        parts.push(
+          <button className="message-text-link" key={`${keyPrefix}-${match.index}-${cleanLink}`} type="button" onClick={() => requestOpenExternalLink(cleanLink)}>
+            {cleanLink}
+          </button>
+        );
+        if (trailing) {
+          parts.push(trailing);
+        }
+      } else {
+        parts.push(rawLink);
+      }
+
+      lastIndex = match.index + rawLink.length;
+    }
+
+    if (lastIndex < text.length) {
+      parts.push(text.slice(lastIndex));
+    }
+
+    return parts.length ? parts : [text];
+  }
+
+  function renderExternalLinksInNodes(nodes: ReactNode | ReactNode[], keyPrefix: string) {
+    const list = Array.isArray(nodes) ? nodes : [nodes];
+    return list.flatMap((node, index) =>
+      typeof node === "string" ? renderExternalLinksInText(node, `${keyPrefix}-${index}`) : [node]
+    );
+  }
+
   function renderDirectMessageText(text: string) {
-    return renderInviteLinksInText(text, (inviteLink, key) => (
-      <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-        {inviteLink}
-      </button>
-    ));
+    return renderExternalLinksInNodes(
+      renderInviteLinksInText(text, (inviteLink, key) => (
+        <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
+          {inviteLink}
+        </button>
+      )),
+      "direct-message-link"
+    );
   }
 
   function renderServerMessageText(message: LocalMessage, rawText = message.text) {
     if (!activeServer) {
-      return renderInviteLinksInText(rawText, (inviteLink, key) => (
-        <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
-          {inviteLink}
-        </button>
-      ));
+      return renderExternalLinksInNodes(
+        renderInviteLinksInText(rawText, (inviteLink, key) => (
+          <button className="message-invite-link" key={key} type="button" onClick={() => void joinInviteCode(inviteLink)}>
+            {inviteLink}
+          </button>
+        )),
+        "server-message-link"
+      );
     }
 
     const parts: ReactNode[] = [];
@@ -6038,7 +6092,7 @@ function WorkspaceShell({
       parts.push(rawText.slice(lastIndex));
     }
 
-    return parts.length ? parts : rawText;
+    return renderExternalLinksInNodes(parts.length ? parts : rawText, `server-message-${message.id ?? message.time}`);
   }
 
   function renderServerNoticeText(text: string) {
@@ -6189,6 +6243,20 @@ function WorkspaceShell({
     setExternalLinkPrompt({ link, risky: isPotentiallyDangerousExternalLink(link) });
   }
 
+  function openYoutubePlayer(link: string, title?: string) {
+    const videoId = getYoutubeVideoId(link);
+    if (!videoId) {
+      requestOpenExternalLink(link);
+      return;
+    }
+
+    setYoutubePlayer({
+      link,
+      videoId,
+      title: title?.trim() || youtubePreviewTitleCache.get(videoId) || "Video do YouTube"
+    });
+  }
+
   function confirmExternalLinkOpen() {
     if (!externalLinkPrompt) {
       return;
@@ -6207,10 +6275,35 @@ function WorkspaceShell({
     setDirectDraftAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
-  function preventEnterSubmit(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter") {
-      event.preventDefault();
+  function shouldSubmitOnEnter(event: KeyboardEvent<HTMLInputElement>) {
+    return event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing;
+  }
+
+  function submitServerMessageOnEnter(event: KeyboardEvent<HTMLInputElement>) {
+    if (!shouldSubmitOnEnter(event)) {
+      return;
     }
+
+    event.preventDefault();
+    void sendMessage();
+  }
+
+  function submitDirectMessageOnEnter(event: KeyboardEvent<HTMLInputElement>) {
+    if (!shouldSubmitOnEnter(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    void sendDirectMessage();
+  }
+
+  function submitVoiceChatMessageOnEnter(event: KeyboardEvent<HTMLInputElement>) {
+    if (!shouldSubmitOnEnter(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    void sendVoiceChatMessage();
   }
 
   async function sendMessage() {
@@ -8821,7 +8914,7 @@ function WorkspaceShell({
                     <input
                       value={voiceChatDraft}
                       onChange={(event) => setVoiceChatDraft(event.target.value)}
-                      onKeyDown={preventEnterSubmit}
+                      onKeyDown={submitVoiceChatMessageOnEnter}
                       placeholder="Chat da call"
                     />
                     <button type="button" title="Enviar no chat da call" disabled={!voiceChatDraft.trim()} onClick={() => void sendVoiceChatMessage()}>
@@ -8903,7 +8996,12 @@ function WorkspaceShell({
                           </strong>
                           <time>{message.time}</time>
                         </header>
-                        <ChatMessageBody message={message} renderText={renderDirectMessageText} onOpenExternalLink={requestOpenExternalLink} />
+                        <ChatMessageBody
+                          message={message}
+                          renderText={renderDirectMessageText}
+                          onOpenExternalLink={requestOpenExternalLink}
+                          onPlayYoutube={openYoutubePlayer}
+                        />
                       </div>
                     </article>
                   );
@@ -8946,7 +9044,7 @@ function WorkspaceShell({
                 onChange={(event) => setDirectDraft(event.target.value)}
                 onPaste={(event) => handleChatPaste(event, "direct")}
                 onContextMenu={(event) => handleComposerContextMenu(event, "direct")}
-                onKeyDown={preventEnterSubmit}
+                onKeyDown={submitDirectMessageOnEnter}
                 disabled={!activeDirect || !canMessageActiveDirect}
                 placeholder={!activeDirect ? "Abra uma DM pelo nick" : !canMessageActiveDirect ? "DM bloqueada para nao amigos" : `Mensagem para @${activeDirect.username}`}
               />
@@ -9093,7 +9191,12 @@ function WorkspaceShell({
                           </button>
                         ) : null}
                       </header>
-                      <ChatMessageBody message={message} renderText={(text) => renderServerMessageText(message, text)} onOpenExternalLink={requestOpenExternalLink} />
+                      <ChatMessageBody
+                        message={message}
+                        renderText={(text) => renderServerMessageText(message, text)}
+                        onOpenExternalLink={requestOpenExternalLink}
+                        onPlayYoutube={openYoutubePlayer}
+                      />
                     </div>
                   </article>
                 );
@@ -9124,7 +9227,7 @@ function WorkspaceShell({
                   onChange={(event) => setDraft(event.target.value)}
                   onPaste={(event) => handleChatPaste(event, "server")}
                   onContextMenu={(event) => handleComposerContextMenu(event, "server")}
-                  onKeyDown={preventEnterSubmit}
+                  onKeyDown={submitServerMessageOnEnter}
                   disabled={channelIsPrivate || !canSendServerMessages || Boolean(activeMemberTimeoutNotice)}
                   placeholder={
                     channelIsPrivate
@@ -9533,6 +9636,15 @@ function WorkspaceShell({
           onContinue={confirmExternalLinkOpen}
         />
       ) : null}
+      {youtubePlayer ? (
+        <YoutubePlayerDialog
+          link={youtubePlayer.link}
+          title={youtubePlayer.title}
+          videoId={youtubePlayer.videoId}
+          onClose={() => setYoutubePlayer(null)}
+          onOpenExternal={requestOpenExternalLink}
+        />
+      ) : null}
     </main>
   );
 }
@@ -9577,10 +9689,19 @@ function SafePreviewImage({ src, alt = "" }: { src: string; alt?: string }) {
   return <img src={source} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
 }
 
-function ExternalLinkPreview({ link, onOpen }: { link: string; onOpen: (link: string) => void }) {
+function ExternalLinkPreview({
+  link,
+  onOpen,
+  onPlayYoutube
+}: {
+  link: string;
+  onOpen: (link: string) => void;
+  onPlayYoutube: (link: string, title?: string) => void;
+}) {
   const youtubeVideoId = getYoutubeVideoId(link);
   const imagePreviewUrl = getAnimatedImagePreviewUrl(link) ?? (looksLikeImageLink(link) ? link : null);
   const risky = isPotentiallyDangerousExternalLink(link);
+  const [youtubeTitle, setYoutubeTitle] = useState(() => (youtubeVideoId ? youtubePreviewTitleCache.get(youtubeVideoId) ?? null : null));
   const hostname = (() => {
     try {
       return new URL(link).hostname.replace(/^www\./, "");
@@ -9589,12 +9710,52 @@ function ExternalLinkPreview({ link, onOpen }: { link: string; onOpen: (link: st
     }
   })();
 
+  useEffect(() => {
+    if (!youtubeVideoId) {
+      setYoutubeTitle(null);
+      return undefined;
+    }
+
+    const cachedTitle = youtubePreviewTitleCache.get(youtubeVideoId) ?? null;
+    setYoutubeTitle(cachedTitle);
+    if (cachedTitle) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    fetch(getYoutubeOEmbedUrl(link))
+      .then((response) => (response.ok ? response.json() : null))
+      .then((metadata: unknown) => {
+        if (cancelled || !metadata || typeof metadata !== "object") {
+          return;
+        }
+
+        const title = typeof (metadata as { title?: unknown }).title === "string" ? (metadata as { title: string }).title.trim() : "";
+        if (!title) {
+          return;
+        }
+
+        youtubePreviewTitleCache.set(youtubeVideoId, title);
+        setYoutubeTitle(title);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [link, youtubeVideoId]);
+
   if (youtubeVideoId) {
+    const previewTitle = youtubeTitle ?? "Video do YouTube";
     return (
-      <button className={["message-link-preview", "youtube", risky ? "risky" : ""].filter(Boolean).join(" ")} type="button" onClick={() => onOpen(link)}>
+      <button
+        className={["message-link-preview", "youtube", risky ? "risky" : ""].filter(Boolean).join(" ")}
+        type="button"
+        title="Abrir player do YouTube"
+        onClick={() => onPlayYoutube(link, previewTitle)}
+      >
         <span className="youtube-provider">YouTube</span>
-        <strong>{getYoutubePreviewTitle(link)}</strong>
-        <small>{link}</small>
+        <strong>{previewTitle}</strong>
         <span className="youtube-thumbnail">
           <SafePreviewImage src={`https://img.youtube.com/vi/${encodeURIComponent(youtubeVideoId)}/hqdefault.jpg`} alt="" />
           <span className="youtube-play">
@@ -9639,11 +9800,13 @@ function ExternalLinkPreview({ link, onOpen }: { link: string; onOpen: (link: st
 function ChatMessageBody({
   message,
   renderText,
-  onOpenExternalLink
+  onOpenExternalLink,
+  onPlayYoutube
 }: {
   message: LocalMessage;
   renderText: (text: string) => ReactNode;
   onOpenExternalLink: (link: string) => void;
+  onPlayYoutube: (link: string, title?: string) => void;
 }) {
   const parsed = parseMessageContent(message.text, message.attachments);
   const externalLinks = extractExternalLinks(parsed.text).filter((link) => !isTempestInviteLink(link));
@@ -9674,7 +9837,7 @@ function ChatMessageBody({
       {externalLinks.length ? (
         <div className="message-link-list">
           {externalLinks.map((link) => (
-            <ExternalLinkPreview link={link} onOpen={onOpenExternalLink} key={link} />
+            <ExternalLinkPreview link={link} onOpen={onOpenExternalLink} onPlayYoutube={onPlayYoutube} key={link} />
           ))}
         </div>
       ) : null}
@@ -9717,6 +9880,45 @@ function ExternalLinkWarningDialog({
             Continuar
           </Button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function YoutubePlayerDialog({
+  videoId,
+  title,
+  link,
+  onClose,
+  onOpenExternal
+}: {
+  videoId: string;
+  title: string;
+  link: string;
+  onClose: () => void;
+  onOpenExternal: (link: string) => void;
+}) {
+  return (
+    <div className="modal-backdrop youtube-player-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="youtube-player-panel" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span>YouTube</span>
+            <strong>{title}</strong>
+          </div>
+          <button className="icon-button" title="Fechar player" type="button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </header>
+        <iframe
+          title={title}
+          src={getYoutubeEmbedUrl(videoId)}
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowFullScreen
+        />
+        <button className="youtube-open-external" type="button" onClick={() => onOpenExternal(link)}>
+          Abrir no YouTube
+        </button>
       </section>
     </div>
   );

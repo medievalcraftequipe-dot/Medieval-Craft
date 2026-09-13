@@ -2711,12 +2711,6 @@ img.profile-avatar {
   white-space: normal;
 }
 
-.message-link-preview.youtube > small {
-  color: #d7d7d7;
-  white-space: normal;
-  word-break: break-word;
-}
-
 .youtube-thumbnail {
   position: relative;
   display: block;
@@ -2771,6 +2765,24 @@ img.profile-avatar {
   font-size: 0.76rem;
 }
 
+.message-text-link {
+  display: inline;
+  border: 0;
+  background: transparent;
+  color: #8cbcff;
+  cursor: pointer;
+  font: inherit;
+  overflow-wrap: anywhere;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-text-link:hover {
+  color: #b8d2ff;
+}
+
 .message-link-preview.youtube .youtube-thumbnail {
   display: block;
   min-width: 0;
@@ -2783,6 +2795,65 @@ img.profile-avatar {
   height: auto;
   border-radius: 0;
   background: rgba(0, 0, 0, 0.18);
+}
+
+.youtube-player-backdrop {
+  z-index: 80;
+}
+
+.youtube-player-panel {
+  display: grid;
+  width: min(920px, calc(100vw - 28px));
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+.youtube-player-panel header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 12px;
+  align-items: center;
+}
+
+.youtube-player-panel header div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.youtube-player-panel header span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.youtube-player-panel header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.youtube-player-panel iframe {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+
+.youtube-open-external {
+  justify-self: end;
+  min-height: 36px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 850;
+  padding: 0 12px;
 }
 
 .message-mention {
