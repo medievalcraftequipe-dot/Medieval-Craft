@@ -624,11 +624,12 @@ button {
 }
 
 .server-header.banner-header {
+  z-index: 30;
   isolation: isolate;
   align-items: flex-start;
   min-height: 128px;
   padding: 8px;
-  overflow: hidden;
+  overflow: visible;
   border-bottom: 0;
   background-color: var(--surface-strong);
   background-position: center;
@@ -718,6 +719,8 @@ button {
   right: 8px;
   display: grid;
   gap: 2px;
+  max-height: min(420px, calc(100vh - 84px));
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
