@@ -381,13 +381,8 @@ function registerIpc() {
       const installerPath = await downloadJsonInstaller(manifest);
       sendUpdateProgress({ percent: 100, transferred: 1, total: 1 });
 
-      const child = spawn(installerPath, [], {
-        detached: true,
-        stdio: "ignore"
-      });
-      child.unref();
-
-      setTimeout(() => app.quit(), 2500);
+      startSilentUpdateInstaller(installerPath);
+      setTimeout(() => app.quit(), 500);
       return { ok: true };
     } catch (error) {
       return {
@@ -396,6 +391,49 @@ function registerIpc() {
       };
     }
   });
+}
+
+function quoteBatchValue(value) {
+  return `"${String(value).replace(/%/g, "%%").replace(/"/g, '""')}"`;
+}
+
+function startSilentUpdateInstaller(installerPath) {
+  const installerArgs = ["/S", "/currentuser"];
+
+  if (process.platform !== "win32") {
+    const child = spawn(installerPath, installerArgs, {
+      detached: true,
+      stdio: "ignore"
+    });
+    child.unref();
+    return;
+  }
+
+  const updateScriptPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.cmd`);
+  const lines = [
+    "@echo off",
+    "set attempts=60",
+    ":wait_for_exit",
+    `tasklist /fi "PID eq ${process.pid}" 2>nul | findstr /r "\\<${process.pid}\\>" >nul`,
+    "if errorlevel 1 goto run_update",
+    "if \"%attempts%\"==\"0\" goto run_update",
+    "set /a attempts=attempts-1 >nul",
+    "timeout /t 1 /nobreak >nul",
+    "goto wait_for_exit",
+    ":run_update",
+    `start "" /wait ${quoteBatchValue(installerPath)} ${installerArgs.join(" ")}`,
+    `start "" ${quoteBatchValue(process.execPath)}`,
+    "del \"%~f0\" >nul 2>nul"
+  ];
+
+  fs.writeFileSync(updateScriptPath, lines.join(os.EOL), "utf8");
+
+  const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", quoteBatchValue(updateScriptPath)], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
 }
 
 function parseDiscordTemplateCode(templateInput) {
