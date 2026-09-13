@@ -5550,6 +5550,17 @@ img.profile-account-avatar {
   background: var(--surface-strong);
 }
 
+.role-list button.role-mentions-disabled {
+  color: var(--muted);
+}
+
+.role-list button.role-mentions-disabled .role-name::after {
+  content: " desativado";
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
 .role-color-dot {
   width: 11px;
   height: 11px;

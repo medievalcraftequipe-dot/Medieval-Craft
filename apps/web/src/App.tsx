@@ -450,6 +450,7 @@ interface ServerRole {
   style?: RoleStyle;
   iconUrl?: string | null;
   permissions: Record<PermissionKey, boolean>;
+  mentionsEnabled?: boolean;
   separateMembers?: boolean;
   isDefault?: boolean;
 }
@@ -3388,6 +3389,7 @@ function normalizeSavedServer(server: Partial<ServerDefinition>, user: AuthUser)
           style: normalizeRoleStyle(role.style),
           iconUrl: sanitizeImageSource(role.iconUrl),
           permissions: { ...defaultEveryonePermissions, ...(role.permissions ?? {}) },
+          mentionsEnabled: role.mentionsEnabled !== false,
           separateMembers: Boolean(role.separateMembers),
           isDefault: Boolean(role.isDefault)
         }))
@@ -7470,6 +7472,7 @@ function WorkspaceShell({
       color: "#99aab5",
       style: "solid",
       iconUrl: null,
+      mentionsEnabled: true,
       separateMembers: false,
       permissions: { ...defaultEveryonePermissions }
     };
@@ -10369,6 +10372,7 @@ function convertDiscordRoles(roles: DiscordRole[], guild: DiscordSerializedGuild
       color: discordColorToHex(role.color, index + 1),
       style: "solid" as const,
       iconUrl: null,
+      mentionsEnabled: true,
       separateMembers: false,
       permissions: mapDiscordPermissions(role.permissions ?? "0", false)
     }));
@@ -10600,6 +10604,7 @@ function cloneServerRoles(roles: ServerRole[]) {
     ...role,
     style: normalizeRoleStyle(role.style),
     iconUrl: role.iconUrl ?? null,
+    mentionsEnabled: role.mentionsEnabled !== false,
     separateMembers: Boolean(role.separateMembers),
     permissions: { ...role.permissions }
   }));
@@ -10737,7 +10742,7 @@ function getMessageMentionResolution(server: ServerDefinition, text: string) {
   });
 
   server.roles
-    .filter((role) => !role.isDefault)
+    .filter((role) => role.mentionsEnabled !== false)
     .forEach((role) => {
       const mentionLabel = findMentionLabel(text, [role.name]);
       if (!mentionLabel) {
@@ -10752,9 +10757,10 @@ function getMessageMentionResolution(server: ServerDefinition, text: string) {
         label: mentionLabel
       });
 
-      server.members
-        .filter((member) => member.roleIds.includes(role.id) && !member.isBot)
-        .forEach((member) => recipientMap.set(member.id, { member, mentionLabel }));
+      const mentionedMembers = role.isDefault
+        ? server.members.filter((member) => !member.isBot)
+        : server.members.filter((member) => member.roleIds.includes(role.id) && !member.isBot);
+      mentionedMembers.forEach((member) => recipientMap.set(member.id, { member, mentionLabel }));
     });
 
   const recipientMentions = Array.from(recipientMap.values());
@@ -10772,7 +10778,7 @@ function canMentionServerRoles(server: ServerDefinition, member: ServerMemberDef
     return true;
   }
 
-  return (["administrator", "manage_messages", "moderate_members", "kick_members", "ban_members"] as PermissionKey[]).some((permission) =>
+  return (["administrator", "mention_everyone", "manage_messages", "moderate_members", "kick_members", "ban_members"] as PermissionKey[]).some((permission) =>
     memberHasPermission(server, member, permission, userId)
   );
 }
@@ -10822,9 +10828,7 @@ function getMentionTargetByToken(server: ServerDefinition, rawToken: string) {
     return { kind: member.isBot ? "bot" : "member", member } as const;
   }
 
-  const role = server.roles.find((item) =>
-    !item.isDefault && getMentionNameAliases(item.name).some((alias) => alias.toLowerCase() === token)
-  );
+  const role = server.roles.find((item) => item.mentionsEnabled !== false && getMentionNameAliases(item.name).some((alias) => alias.toLowerCase() === token));
   return role ? ({ kind: "role", role } as const) : null;
 }
 
@@ -11090,6 +11094,7 @@ function createEveryoneRole(permissionsOverride?: Record<PermissionKey, boolean>
     style: "solid",
     iconUrl: null,
     permissions: permissionsOverride ? { ...permissionsOverride } : { ...defaultEveryonePermissions },
+    mentionsEnabled: true,
     separateMembers: false,
     isDefault: true
   };
@@ -13740,10 +13745,8 @@ function ServerSettingsDialog({
       return;
     }
 
-    const movableRoles = server.roles.filter((role) => !role.isDefault);
-    const defaultRoles = server.roles.filter((role) => role.isDefault);
-    const fromIndex = movableRoles.findIndex((role) => role.id === draggedRoleId);
-    const toIndex = movableRoles.findIndex((role) => role.id === targetRoleId);
+    const fromIndex = server.roles.findIndex((role) => role.id === draggedRoleId);
+    const toIndex = server.roles.findIndex((role) => role.id === targetRoleId);
 
     if (fromIndex < 0 || toIndex < 0) {
       setDraggedRoleId(null);
@@ -13751,7 +13754,7 @@ function ServerSettingsDialog({
     }
 
     onUpdateServer(
-      { roles: [...reorderItems(movableRoles, fromIndex, toIndex), ...defaultRoles] },
+      { roles: reorderItems(server.roles, fromIndex, toIndex) },
       { action: "role_updated", target: server.name, details: "Ordem dos cargos atualizada." }
     );
     setDraggedRoleId(null);
@@ -14799,28 +14802,30 @@ function ServerSettingsDialog({
           </button>
           {server.roles.map((role) => (
             <button
-              className={selectedRole.id === role.id ? "active" : ""}
+              className={[selectedRole.id === role.id ? "active" : "", role.mentionsEnabled === false ? "role-mentions-disabled" : ""]
+                .filter(Boolean)
+                .join(" ")}
               key={role.id}
               type="button"
-              draggable={canReorderRoles && !role.isDefault}
+              draggable={canReorderRoles}
               onContextMenu={(event) => {
-                if (canReorderRoles && !role.isDefault) {
+                if (canReorderRoles) {
                   event.preventDefault();
                 }
               }}
               onMouseDown={(event) => {
-                if (canReorderRoles && !role.isDefault && event.button === 2) {
+                if (canReorderRoles && event.button === 2) {
                   setDraggedRoleId(role.id);
                 }
               }}
               onMouseEnter={() => {
-                if (canReorderRoles && draggedRoleId && draggedRoleId !== role.id && !role.isDefault) {
+                if (canReorderRoles && draggedRoleId && draggedRoleId !== role.id) {
                   reorderRole(role.id);
                 }
               }}
               onMouseUp={() => setDraggedRoleId(null)}
               onDragStart={(event) => {
-                if (!canReorderRoles || role.isDefault) {
+                if (!canReorderRoles) {
                   return;
                 }
 
@@ -14828,20 +14833,20 @@ function ServerSettingsDialog({
                 event.dataTransfer.effectAllowed = "move";
               }}
               onDragOver={(event) => {
-                if (canReorderRoles && draggedRoleId && !role.isDefault) {
+                if (canReorderRoles && draggedRoleId) {
                   event.preventDefault();
                 }
               }}
               onDrop={(event) => {
                 event.preventDefault();
-                if (!role.isDefault) {
+                if (canReorderRoles) {
                   reorderRole(role.id);
                 }
               }}
               onDragEnd={() => setDraggedRoleId(null)}
               onClick={() => setSelectedRoleId(role.id)}
             >
-              {canReorderRoles && !role.isDefault ? <GripVertical className="drag-handle" size={14} /> : <span className="role-drag-spacer" />}
+              {canReorderRoles ? <GripVertical className="drag-handle" size={14} /> : <span className="role-drag-spacer" />}
               <span className="role-color-dot" style={{ background: role.color }} />
               <span className="role-name">{role.name}</span>
             </button>
@@ -14956,6 +14961,20 @@ function ServerSettingsDialog({
                   </strong>
                   <p>as pedras sao muito antigas</p>
                 </div>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <strong>{selectedRole.isDefault ? "Ativar mencao @everyone" : "Ativar mencao deste cargo"}</strong>
+                  <p>
+                    {selectedRole.isDefault
+                      ? "Quando ligado, mencionar @everyone envia notificacao para todos os membros do servidor."
+                      : "Quando ligado, mencionar este cargo notifica os membros que possuem o cargo."}
+                  </p>
+                </div>
+                <ToggleSwitch
+                  checked={selectedRole.mentionsEnabled !== false}
+                  onChange={(checked) => onUpdateRole(server.id, selectedRole.id, { mentionsEnabled: checked })}
+                />
               </div>
               <div className="settings-row">
                 <div>
