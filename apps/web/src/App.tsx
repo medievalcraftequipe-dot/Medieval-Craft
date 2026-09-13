@@ -3539,6 +3539,34 @@ function formatMessageClock(value: string) {
   });
 }
 
+function formatMessageTimestamp(message: LocalMessage, now = Date.now()) {
+  const createdAt = Date.parse(message.createdAt ?? "");
+  if (Number.isNaN(createdAt)) {
+    return message.time;
+  }
+
+  const messageDate = new Date(createdAt);
+  const today = new Date(now);
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const startOfMessageDay = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate()).getTime();
+  const dayDiff = Math.floor((startOfToday - startOfMessageDay) / 86_400_000);
+  const clock = formatMessageClock(messageDate.toISOString());
+
+  if (dayDiff <= 0) {
+    return clock;
+  }
+
+  if (dayDiff === 1) {
+    return `Ontem ${clock}`;
+  }
+
+  return `${messageDate.toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  })} ${clock}`;
+}
+
 function onlineServerMessageToLocalMessage(message: OnlineServerMessage): LocalMessage {
   const mentions = message.mentions && Array.isArray(message.mentions.mentions) ? (message.mentions.mentions as MessageMention[]) : [];
   const mentionedUserIds =
@@ -9082,7 +9110,7 @@ function WorkspaceShell({
                             {authorProfile.displayName}
                             {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
                           </strong>
-                          <time>{message.time}</time>
+                          <time dateTime={message.createdAt}>{formatMessageTimestamp(message, nowTick)}</time>
                         </header>
                         <ChatMessageBody
                           message={message}
@@ -9280,7 +9308,7 @@ function WorkspaceShell({
                           {authorProfile.displayName}
                           {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
                         </strong>
-                        <time>{message.time}</time>
+                        <time dateTime={message.createdAt}>{formatMessageTimestamp(message, nowTick)}</time>
                         {messageCanBeDeleted ? (
                           <button
                             className="message-delete-button"
