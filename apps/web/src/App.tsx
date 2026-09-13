@@ -6800,10 +6800,8 @@ function WorkspaceShell({
     try {
       await api.leaveServerVoice(serverId);
       setOnlineSyncStatus("idle");
-      setServerNotice("Voce saiu da call.");
     } catch {
       setOnlineSyncStatus("error");
-      setServerNotice("Voce saiu da call, mas a API pode demorar alguns segundos para atualizar.");
     }
   }
 
@@ -8054,9 +8052,8 @@ function WorkspaceShell({
         setServerNotice(mode === "game" ? "Escolha a janela do jogo para transmitir." : "Escolha a tela para transmitir.");
       }
 
-      const stream = await onlineVoiceCall.startScreenShare(screenShareQuality, screenShareFps, mode === "game" ? "window" : "monitor", sourceId);
+      await onlineVoiceCall.startScreenShare(screenShareQuality, screenShareFps, mode === "game" ? "window" : "monitor", sourceId);
       setVoiceShareMenuOpen(false);
-      setServerNotice(stream.getAudioTracks().length ? "Transmissao iniciada com audio do computador." : "Transmissao iniciada sem audio do computador.");
     } catch (caught) {
       setServerNotice(getScreenShareFailureNotice(caught));
     }
