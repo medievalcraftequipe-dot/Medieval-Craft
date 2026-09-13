@@ -334,6 +334,7 @@ type AuditAction =
   | "community_disabled"
   | "bot_added"
   | "bot_updated"
+  | "bot_removed"
   | "member_kicked"
   | "member_banned"
   | "member_unbanned"
@@ -754,6 +755,7 @@ interface ProfileCardUser {
   starBalance: number;
   accountCreatedAt?: string | null;
   serverJoinedAt?: string | null;
+  serverRoleIds?: string[];
   isOwnProfile: boolean;
   isFriend?: boolean;
   canMessage?: boolean;
@@ -920,6 +922,7 @@ const auditActionLabels: Record<AuditAction, string> = {
   community_disabled: "Comunidade desabilitada",
   bot_added: "Bot adicionado",
   bot_updated: "Bot atualizado",
+  bot_removed: "Bot removido",
   member_kicked: "Membro expulso",
   member_banned: "Membro banido",
   member_unbanned: "Membro desbanido",
@@ -4818,7 +4821,8 @@ function WorkspaceShell({
   const onlineMode = Boolean(api);
   const activeServer = servers.find((server) => server.id === activeServerId) ?? null;
   const activeServerMember = activeServer?.members.find((member) => member.id === user.id) ?? null;
-  const canManageRoles = memberHasPermission(activeServer, activeServerMember, "manage_roles", user.id);
+  const currentUserIsDeveloper = isDeveloperUser(user);
+  const canManageRoles = currentUserIsDeveloper || memberHasPermission(activeServer, activeServerMember, "manage_roles", user.id);
   const canManageChannels = memberHasPermission(activeServer, activeServerMember, "manage_channels", user.id);
   const canCreateInvite = memberHasPermission(activeServer, activeServerMember, "create_invite", user.id);
   const canCreateEvents = memberHasPermission(activeServer, activeServerMember, "create_events", user.id);
@@ -7062,7 +7066,15 @@ function WorkspaceShell({
     onlineVoiceCall.stopScreenShare();
 
     if (serverId) {
-      setOnlineVoiceStates((current) => current.filter((state) => !(state.serverId === serverId && state.userId === user.id)));
+      setOnlineVoiceStates((current) =>
+        current.filter(
+          (state) =>
+            !(
+              state.serverId === serverId &&
+              (state.userId === user.id || state.username.toLowerCase() === user.username.toLowerCase())
+            )
+        )
+      );
     }
 
     if (!onlineMode || !api || !serverId) {
@@ -7933,7 +7945,7 @@ function WorkspaceShell({
   }
 
   function setMemberRole(serverId: string, memberId: string, roleId: string, enabled: boolean) {
-    if (!memberHasPermission(activeServer, activeServerMember, "manage_roles", user.id)) {
+    if (!canManageRoles) {
       setServerNotice("Seu cargo nao permite atribuir cargos.");
       return;
     }
@@ -7981,6 +7993,7 @@ function WorkspaceShell({
       starBalance: clampStarBalance(user.starBalance),
       accountCreatedAt: user.createdAt,
       serverJoinedAt: activeServerMember?.joinedAt ?? null,
+      serverRoleIds: activeServerMember?.roleIds ?? [],
       isOwnProfile: true,
       mutualFriends: directContacts.filter((contact) => contact.isFriend).length,
       mutualServers: servers.length,
@@ -8044,6 +8057,7 @@ function WorkspaceShell({
       return {
         ...getOwnProfileCard(),
         serverJoinedAt: member.joinedAt,
+        serverRoleIds: member.roleIds,
         mutualServers: activeServer ? 1 : servers.length
       };
     }
@@ -8058,6 +8072,7 @@ function WorkspaceShell({
         bio: member.bio ?? card.bio,
         starBalance: clampStarBalance(member.starBalance ?? card.starBalance),
         serverJoinedAt: member.joinedAt,
+        serverRoleIds: member.roleIds,
         isOwnProfile: false
       };
     }
@@ -8073,6 +8088,7 @@ function WorkspaceShell({
       starBalance: clampStarBalance(member.starBalance),
       accountCreatedAt: member.accountCreatedAt ?? member.joinedAt,
       serverJoinedAt: member.joinedAt,
+      serverRoleIds: member.roleIds,
       isOwnProfile: false,
       mutualFriends: 0,
       mutualServers: activeServer ? 1 : 0
@@ -8111,6 +8127,43 @@ function WorkspaceShell({
       displayName: message.author,
       avatarUrl: message.authorAvatarUrl ?? null
     };
+  }
+
+  function openMessageAuthorProfile(message: LocalMessage, directContact?: DirectContact | null) {
+    if (messageBelongsToCurrentUser(message, user)) {
+      setProfileCardUser(getOwnProfileCard());
+      return;
+    }
+
+    const serverMember = activeServer?.members.find(
+      (member) => member.id === message.authorId || member.username === message.authorUsername || member.displayName === message.author
+    );
+    if (serverMember) {
+      setProfileCardUser(getMemberProfileCard(getDisplayMember(serverMember)));
+      return;
+    }
+
+    const contact = directContact ?? directContacts.find(
+      (item) => item.id === message.authorId || item.username === message.authorUsername || item.displayName === message.author
+    );
+    if (contact) {
+      setProfileCardUser(getDirectProfileCard(contact));
+      return;
+    }
+
+    setProfileCardUser({
+      id: message.authorId ?? message.authorUsername ?? message.author,
+      username: message.authorUsername ?? normalizeAccountUsername(message.author),
+      displayName: message.author,
+      avatarUrl: message.authorAvatarUrl ?? null,
+      presence: "OFFLINE",
+      starBalance: 0,
+      accountCreatedAt: message.createdAt,
+      serverJoinedAt: message.serverId ? message.createdAt : null,
+      isOwnProfile: false,
+      mutualFriends: 0,
+      mutualServers: message.serverId && activeServer ? 1 : 0
+    });
   }
 
   function getVoiceProfileCard(state: OnlineVoiceState): ProfileCardUser {
@@ -8436,6 +8489,10 @@ function WorkspaceShell({
     setDirectNotice("A API online precisa estar conectada para iniciar DMs.");
   }
 
+  const liveProfileServerMember =
+    profileCardUser && activeServer
+      ? activeServer.members.find((member) => member.id === profileCardUser.id || member.username === profileCardUser.username) ?? null
+      : null;
   const liveProfileCardUser = profileCardUser
     ? {
         ...profileCardUser,
@@ -8448,6 +8505,7 @@ function WorkspaceShell({
         presence: profileCardUser.id === user.id ? user.presence : profileCardUser.presence,
         starBalance: profileCardUser.id === user.id ? clampStarBalance(user.starBalance) : clampStarBalance(profileCardUser.starBalance),
         accountCreatedAt: profileCardUser.id === user.id ? user.createdAt : profileCardUser.accountCreatedAt,
+        serverRoleIds: liveProfileServerMember?.roleIds ?? profileCardUser.serverRoleIds,
         voiceStatus: profileCardUser.id === user.id ? ownVoiceStatus : profileCardUser.voiceStatus,
         steamActivity: profileCardUser.id === user.id ? currentActivity ?? undefined : profileCardUser.steamActivity
       }
@@ -9515,13 +9573,15 @@ function WorkspaceShell({
                   const authorProfile = getMessageAuthorProfile(message, activeDirect);
                   return (
                     <article className="message" key={`${activeDirect.id}-${message.author}-${message.time}-${index}`}>
-                      <AvatarBadge user={authorProfile} className="message-avatar" />
+                      <button className="message-avatar-button" type="button" title="Ver perfil" onClick={() => openMessageAuthorProfile(message, activeDirect)}>
+                        <AvatarBadge user={authorProfile} className="message-avatar" />
+                      </button>
                       <div>
                         <header>
-                          <strong>
+                          <button className="message-author-button" type="button" onClick={() => openMessageAuthorProfile(message, activeDirect)}>
                             {authorProfile.displayName}
                             {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
-                          </strong>
+                          </button>
                           <time dateTime={message.createdAt}>{formatMessageTimestamp(message, nowTick)}</time>
                         </header>
                         <ChatMessageBody
@@ -9713,13 +9773,15 @@ function WorkspaceShell({
                     className={["message", messageMentionsUser(message, user) ? "mentioned" : ""].filter(Boolean).join(" ")}
                     key={message.id ?? `${activeServer.id}-${message.author}-${message.time}-${index}`}
                   >
-                    <AvatarBadge user={authorProfile} className="message-avatar" />
+                    <button className="message-avatar-button" type="button" title="Ver perfil" onClick={() => openMessageAuthorProfile(message)}>
+                      <AvatarBadge user={authorProfile} className="message-avatar" />
+                    </button>
                     <div>
                       <header>
-                        <strong>
+                        <button className="message-author-button" type="button" onClick={() => openMessageAuthorProfile(message)}>
                           {authorProfile.displayName}
                           {message.authorIsBot ? <span className="bot-badge">APP</span> : null}
-                        </strong>
+                        </button>
                         <time dateTime={message.createdAt}>{formatMessageTimestamp(message, nowTick)}</time>
                         {messageCanBeDeleted ? (
                           <button
@@ -10012,6 +10074,13 @@ function WorkspaceShell({
               }
             }
             setProfileCardUser(null);
+          }}
+          serverRoles={activeServer?.roles ?? []}
+          canManageServerRoles={Boolean(activeServer && liveProfileServerMember && canManageRoles)}
+          onToggleServerRole={(memberId, roleId, enabled) => {
+            if (activeServer) {
+              setMemberRole(activeServer.id, memberId, roleId, enabled);
+            }
           }}
           linkedAccounts={linkedAccounts}
           canUseAccountSwitcher={canUseAccountSwitcher}
@@ -11623,6 +11692,9 @@ function ProfileCardDialog({
   onClose,
   onEdit,
   onMessage,
+  serverRoles = [],
+  canManageServerRoles = false,
+  onToggleServerRole,
   linkedAccounts = [],
   canUseAccountSwitcher = false,
   onSwitchAccount,
@@ -11632,6 +11704,9 @@ function ProfileCardDialog({
   onClose: () => void;
   onEdit: () => void;
   onMessage: () => void;
+  serverRoles?: ServerRole[];
+  canManageServerRoles?: boolean;
+  onToggleServerRole?: (memberId: string, roleId: string, enabled: boolean) => void;
   linkedAccounts?: AuthUser[];
   canUseAccountSwitcher?: boolean;
   onSwitchAccount?: (accountId: string) => void;
@@ -11643,6 +11718,10 @@ function ProfileCardDialog({
   const serverJoinedAge = formatPublicAge(profile.serverJoinedAt);
   const [accountMenuId, setAccountMenuId] = useState<string | null>(null);
   const [accountSwitcherNotice, setAccountSwitcherNotice] = useState<string | null>(null);
+  const [roleMenuOpen, setRoleMenuOpen] = useState(false);
+  const assignableRoles = serverRoles.filter((role) => !role.isDefault);
+  const profileServerRoleIds = new Set(profile.serverRoleIds ?? []);
+  const showRoleManager = canManageServerRoles && Boolean(profile.serverJoinedAt) && Boolean(onToggleServerRole) && assignableRoles.length > 0;
   const availableAccounts = linkedAccounts.length
     ? linkedAccounts
     : profile.isOwnProfile
@@ -11760,6 +11839,32 @@ function ProfileCardDialog({
                   Entrou neste servidor em {serverJoinedDate}
                   {serverJoinedAge ? ` - ${serverJoinedAge}` : ""}
                 </span>
+              ) : null}
+            </div>
+          ) : null}
+
+          {showRoleManager ? (
+            <div className="profile-role-manager">
+              <button className="profile-role-add" type="button" title="Adicionar cargo" onClick={() => setRoleMenuOpen((current) => !current)}>
+                <Plus size={15} />
+              </button>
+              {roleMenuOpen ? (
+                <div className="profile-role-menu">
+                  {assignableRoles.map((role) => {
+                    const checked = profileServerRoleIds.has(role.id);
+                    return (
+                      <button
+                        key={`profile-role-${role.id}`}
+                        type="button"
+                        onClick={() => onToggleServerRole?.(profile.id, role.id, !checked)}
+                      >
+                        <span className="role-color-dot" style={{ background: role.color }} />
+                        <span>{role.name}</span>
+                        {checked ? <CheckCircle2 size={15} /> : <Plus size={14} />}
+                      </button>
+                    );
+                  })}
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -12830,6 +12935,9 @@ function ServerSettingsDialog({
   const [botTokenDraft, setBotTokenDraft] = useState("");
   const [tempestBotTokenResult, setTempestBotTokenResult] = useState<string | null>(null);
   const [botNameDraft, setBotNameDraft] = useState("");
+  const [botAvatarDraft, setBotAvatarDraft] = useState("");
+  const [botBannerDraft, setBotBannerDraft] = useState("");
+  const [botDescriptionDraft, setBotDescriptionDraft] = useState("");
   const [botPrefixDraft, setBotPrefixDraft] = useState("!");
   const [botCommandDraft, setBotCommandDraft] = useState("ping");
   const [botReplyDraft, setBotReplyDraft] = useState("Pong! Bot funcionando dentro do Tempest Light.");
@@ -13772,9 +13880,37 @@ function ServerSettingsDialog({
     updateBot(bot.id, { commandChannelNames: nextChannels });
   }
 
+  async function loadBotImage(
+    event: ChangeEvent<HTMLInputElement>,
+    applyImage: (imageDataUrl: string) => void,
+    resize?: { width: number; height: number }
+  ) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    if (!isImageFile(file)) {
+      setSettingsNotice("Escolha uma imagem valida para o bot.");
+      return;
+    }
+
+    try {
+      const imageDataUrl = await readImageFileAsDataUrl(file, resize);
+      applyImage(imageDataUrl);
+      setSettingsNotice("Imagem do bot carregada.");
+    } catch {
+      setSettingsNotice("Nao foi possivel carregar essa imagem do bot.");
+    }
+  }
+
   function resetBotDrafts() {
     setBotTokenDraft("");
     setBotNameDraft("");
+    setBotAvatarDraft("");
+    setBotBannerDraft("");
+    setBotDescriptionDraft("");
     setBotPrefixDraft("!");
     setBotCommandDraft("ping");
     setBotReplyDraft("Pong! Bot funcionando dentro do Tempest Light.");
@@ -13796,7 +13932,9 @@ function ServerSettingsDialog({
       platform: "tempest",
       username,
       displayName,
-      description: "Bot criado dentro do Tempest Light.",
+      avatarUrl: botAvatarDraft || null,
+      bannerUrl: botBannerDraft || null,
+      description: botDescriptionDraft.trim() || "Bot criado dentro do Tempest Light.",
       bridgeStatus: "connected",
       prefix: botPrefixDraft,
       commandName: botCommandDraft,
@@ -13864,9 +14002,9 @@ function ServerSettingsDialog({
       discordApplicationId: discordBotInfo?.id ?? null,
       username: discordBotInfo?.username,
       displayName: botNameDraft || discordBotInfo?.displayName,
-      avatarUrl: discordBotInfo?.avatarUrl ?? null,
-      bannerUrl: discordBotInfo?.bannerUrl ?? null,
-      description: discordBotInfo?.description ?? null,
+      avatarUrl: botAvatarDraft || discordBotInfo?.avatarUrl || null,
+      bannerUrl: botBannerDraft || discordBotInfo?.bannerUrl || null,
+      description: botDescriptionDraft.trim() || discordBotInfo?.description || null,
       bridgeStatus: "pending",
       prefix: botPrefixDraft,
       commandName: botCommandDraft,
@@ -13935,6 +14073,27 @@ function ServerSettingsDialog({
       },
       { action: "bot_updated", target: server.name, details: "Configuracao de bot atualizada." }
     );
+  }
+
+  function deleteBot(botId: string) {
+    if (!canManageServerSettings && !developerUser) {
+      setSettingsNotice("Seu cargo nao permite excluir bots.");
+      return;
+    }
+
+    const bot = server.bots.find((item) => item.id === botId);
+    if (!bot) {
+      return;
+    }
+
+    onUpdateServer(
+      {
+        bots: server.bots.filter((item) => item.id !== botId),
+        members: server.members.filter((member) => member.id !== botId)
+      },
+      { action: "bot_removed", target: bot.displayName, details: "Bot removido do servidor." }
+    );
+    setSettingsNotice(`${bot.displayName} foi excluido do servidor.`);
   }
 
   function saveBoostPerks(patch: Partial<ServerBoostPerks>) {
@@ -15966,6 +16125,43 @@ function ServerSettingsDialog({
               placeholder="Bot Tempest"
             />
           </label>
+          <label>
+            Descricao do bot
+            <textarea
+              value={botDescriptionDraft}
+              onChange={(event) => setBotDescriptionDraft(event.target.value.slice(0, 240))}
+              maxLength={240}
+              placeholder="Explique o que esse bot faz neste servidor"
+            />
+          </label>
+          <div className="bot-media-grid">
+            <div className="bot-media-field">
+              <div className="bot-media-preview avatar">{botAvatarDraft ? <SafePreviewImage src={botAvatarDraft} alt="" /> : <Bot size={20} />}</div>
+              <label className="upload-button">
+                <Upload size={16} />
+                Foto do bot
+                <input accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif" type="file" onChange={(event) => void loadBotImage(event, setBotAvatarDraft, { width: 256, height: 256 })} />
+              </label>
+              {botAvatarDraft ? (
+                <button className="ghost-button" type="button" onClick={() => setBotAvatarDraft("")}>
+                  Remover
+                </button>
+              ) : null}
+            </div>
+            <div className="bot-media-field">
+              <div className="bot-media-preview banner">{botBannerDraft ? <SafePreviewImage src={botBannerDraft} alt="" /> : <ImageIcon size={20} />}</div>
+              <label className="upload-button">
+                <Upload size={16} />
+                Banner do bot
+                <input accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif" type="file" onChange={(event) => void loadBotImage(event, setBotBannerDraft, { width: 960, height: 320 })} />
+              </label>
+              {botBannerDraft ? (
+                <button className="ghost-button" type="button" onClick={() => setBotBannerDraft("")}>
+                  Remover
+                </button>
+              ) : null}
+            </div>
+          </div>
           <div className="bot-command-grid">
             <label>
               Prefixo
@@ -15984,42 +16180,48 @@ function ServerSettingsDialog({
             Resposta inicial
             <input value={botReplyDraft} onChange={(event) => setBotReplyDraft(event.target.value)} maxLength={240} />
           </label>
-          <div className="bot-config-section">
-            <strong>Modulos de comandos</strong>
-            <div className="bot-chip-grid">
-              {defaultBotCommandModules.map((module) => (
-                <label className="checkbox-row" key={`new-bot-module-${module}`}>
-                  <input
-                    checked={botModuleDraft.includes(module)}
-                    onChange={(event) => toggleBotModuleDraft(module, event.target.checked)}
-                    type="checkbox"
-                  />
-                  {botCommandModuleLabels[module]}
-                </label>
-              ))}
-            </div>
-          </div>
-          <div className="bot-config-section">
-            <strong>Canais onde comandos podem funcionar</strong>
-            <label className="checkbox-row">
-              <input checked={!botChannelDraft.length} onChange={() => setBotChannelDraft([])} type="checkbox" />
-              Todos os canais de texto
-            </label>
-            {textChannels.length ? (
+          <details className="bot-config-details" open>
+            <summary>
+              <span>Comandos, modulos e canais</span>
+              <ChevronDown size={16} />
+            </summary>
+            <div className="bot-config-section">
+              <strong>Modulos de comandos</strong>
               <div className="bot-chip-grid">
-                {textChannels.map((channel) => (
-                  <label className="checkbox-row" key={`new-bot-channel-${channel.name}`}>
+                {defaultBotCommandModules.map((module) => (
+                  <label className="checkbox-row" key={`new-bot-module-${module}`}>
                     <input
-                      checked={!botChannelDraft.length || botChannelDraft.includes(channel.name)}
-                      onChange={(event) => toggleBotChannelDraft(channel.name, event.target.checked)}
+                      checked={botModuleDraft.includes(module)}
+                      onChange={(event) => toggleBotModuleDraft(module, event.target.checked)}
                       type="checkbox"
                     />
-                    #{channel.name}
+                    {botCommandModuleLabels[module]}
                   </label>
                 ))}
               </div>
-            ) : null}
-          </div>
+            </div>
+            <div className="bot-config-section">
+              <strong>Canais onde comandos podem funcionar</strong>
+              <label className="checkbox-row">
+                <input checked={!botChannelDraft.length} onChange={() => setBotChannelDraft([])} type="checkbox" />
+                Todos os canais de texto
+              </label>
+              {textChannels.length ? (
+                <div className="bot-chip-grid">
+                  {textChannels.map((channel) => (
+                    <label className="checkbox-row" key={`new-bot-channel-${channel.name}`}>
+                      <input
+                        checked={!botChannelDraft.length || botChannelDraft.includes(channel.name)}
+                        onChange={(event) => toggleBotChannelDraft(channel.name, event.target.checked)}
+                        type="checkbox"
+                      />
+                      #{channel.name}
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </details>
           <Button variant="primary" type="button" onClick={addTempestBot} disabled={!canManageServerSettings}>
             <Bot size={18} />
             Criar bot Tempest
@@ -16095,6 +16297,9 @@ function ServerSettingsDialog({
                   <small>Adicionado em {new Date(bot.addedAt).toLocaleString("pt-BR")}</small>
                 </div>
                 <ToggleSwitch checked={bot.runtimeEnabled} onChange={(checked) => updateBot(bot.id, { runtimeEnabled: checked })} />
+                <button className="icon-button bot-delete-button" title="Excluir bot" type="button" onClick={() => deleteBot(bot.id)}>
+                  <Trash2 size={16} />
+                </button>
                 <div className="bot-inline-editor">
                   <input
                     defaultValue={bot.displayName}
@@ -16116,43 +16321,67 @@ function ServerSettingsDialog({
                     onBlur={(event) => updateBot(bot.id, { replyText: event.target.value.slice(0, 240) })}
                     aria-label="Resposta do bot"
                   />
+                  <input
+                    defaultValue={bot.description ?? ""}
+                    onBlur={(event) => updateBot(bot.id, { description: event.target.value.slice(0, 240) || null })}
+                    aria-label="Descricao do bot"
+                    placeholder="Descricao do bot"
+                  />
+                  <input
+                    defaultValue={bot.avatarUrl ?? ""}
+                    onBlur={(event) => updateBot(bot.id, { avatarUrl: sanitizeImageSource(event.target.value) })}
+                    aria-label="URL da foto do bot"
+                    placeholder="URL da foto do bot"
+                  />
+                  <input
+                    defaultValue={bot.bannerUrl ?? ""}
+                    onBlur={(event) => updateBot(bot.id, { bannerUrl: sanitizeImageSource(event.target.value) })}
+                    aria-label="URL do banner do bot"
+                    placeholder="URL do banner do bot"
+                  />
                 </div>
-                <div className="bot-module-editor">
-                  <strong>Modulos liberados</strong>
-                  <div className="bot-chip-grid">
-                    {defaultBotCommandModules.map((module) => (
-                      <label className="checkbox-row" key={`${bot.id}-module-${module}`}>
-                        <input
-                          checked={bot.commandModules.includes(module)}
-                          onChange={(event) => toggleSavedBotModule(bot, module, event.target.checked)}
-                          type="checkbox"
-                        />
-                        {botCommandModuleLabels[module]}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="bot-channel-editor">
-                  <strong>Canais de comandos</strong>
-                  <label className="checkbox-row">
-                    <input checked={!bot.commandChannelNames.length} onChange={() => updateBot(bot.id, { commandChannelNames: [] })} type="checkbox" />
-                    Todos os canais de texto
-                  </label>
-                  {textChannels.length ? (
+                <details className="bot-saved-details">
+                  <summary>
+                    <span>Modulos e canais liberados</span>
+                    <ChevronDown size={16} />
+                  </summary>
+                  <div className="bot-module-editor">
+                    <strong>Modulos liberados</strong>
                     <div className="bot-chip-grid">
-                      {textChannels.map((channel) => (
-                        <label className="checkbox-row" key={`${bot.id}-channel-${channel.name}`}>
+                      {defaultBotCommandModules.map((module) => (
+                        <label className="checkbox-row" key={`${bot.id}-module-${module}`}>
                           <input
-                            checked={!bot.commandChannelNames.length || bot.commandChannelNames.includes(channel.name)}
-                            onChange={(event) => toggleSavedBotChannel(bot, channel.name, event.target.checked)}
+                            checked={bot.commandModules.includes(module)}
+                            onChange={(event) => toggleSavedBotModule(bot, module, event.target.checked)}
                             type="checkbox"
                           />
-                          #{channel.name}
+                          {botCommandModuleLabels[module]}
                         </label>
                       ))}
                     </div>
-                  ) : null}
-                </div>
+                  </div>
+                  <div className="bot-channel-editor">
+                    <strong>Canais de comandos</strong>
+                    <label className="checkbox-row">
+                      <input checked={!bot.commandChannelNames.length} onChange={() => updateBot(bot.id, { commandChannelNames: [] })} type="checkbox" />
+                      Todos os canais de texto
+                    </label>
+                    {textChannels.length ? (
+                      <div className="bot-chip-grid">
+                        {textChannels.map((channel) => (
+                          <label className="checkbox-row" key={`${bot.id}-channel-${channel.name}`}>
+                            <input
+                              checked={!bot.commandChannelNames.length || bot.commandChannelNames.includes(channel.name)}
+                              onChange={(event) => toggleSavedBotChannel(bot, channel.name, event.target.checked)}
+                              type="checkbox"
+                            />
+                            #{channel.name}
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
               </article>
             ))
           ) : (

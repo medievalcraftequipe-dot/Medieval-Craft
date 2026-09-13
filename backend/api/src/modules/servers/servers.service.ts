@@ -984,9 +984,10 @@ export class ServersService {
     const existingMembers = Array.isArray(state.members) ? state.members.filter((member) => this.isRecord(member)) : [];
     const memberById = new Map(
       existingMembers
-        .filter((member) => member.isBot === true)
-        .map((member) => [String(member.id ?? ""), member])
+        .filter((member) => typeof member.id === "string" && member.id.trim())
+        .map((member) => [String(member.id), member])
     );
+    const databaseMemberIds = new Set(server.members.map((membership) => membership.userId));
 
     for (const membership of server.members) {
       const existing = memberById.get(membership.userId) ?? {};
@@ -1010,7 +1011,10 @@ export class ServersService {
 
     return {
       ...state,
-      members: Array.from(memberById.values())
+      members: Array.from(memberById.values()).filter((member) => {
+        const memberId = this.isRecord(member) ? this.readOptionalString(member.id) : null;
+        return Boolean(memberId && (databaseMemberIds.has(memberId) || member.isBot === true));
+      })
     };
   }
 
@@ -1058,7 +1062,10 @@ export class ServersService {
   }
 
   private async canManageServer(server: { ownerId: string; clientState: unknown }, userId: string) {
-    if (server.ownerId === userId || this.userHasStatePermission(server.clientState, userId, ["administrator", "manage_server"])) {
+    if (
+      server.ownerId === userId ||
+      this.userHasStatePermission(server.clientState, userId, ["administrator", "manage_server", "manage_channels", "manage_roles"])
+    ) {
       return true;
     }
 
