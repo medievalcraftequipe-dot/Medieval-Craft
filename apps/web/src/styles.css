@@ -3051,8 +3051,15 @@ img.profile-avatar {
   display: grid;
   gap: 12px;
   max-height: min(380px, calc(100vh - 252px));
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 2px;
+  scrollbar-width: none;
+}
+
+.composer-emoji-server-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .composer-picker-with-rail {
@@ -3067,9 +3074,16 @@ img.profile-avatar {
   align-content: start;
   gap: 7px;
   max-height: min(380px, calc(100vh - 252px));
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   border-right: 1px solid var(--line);
   padding-right: 8px;
+  scrollbar-width: none;
+}
+
+.composer-picker-rail::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .composer-picker-rail-item {
