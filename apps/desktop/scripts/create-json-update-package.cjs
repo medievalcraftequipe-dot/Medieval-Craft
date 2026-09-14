@@ -55,7 +55,7 @@ const manifest = {
   sha256: packageSha256,
   publishedAt,
   changelog:
-    `Atualizacao do Tempest Light v${version}: publicacoes em perfis, curtidas em perfis, curtidas em comunidades e sincronizacao online dessas interacoes.`,
+    `Atualizacao do Tempest Light v${version}: instalacao silenciosa reforcada e reabertura automatica do programa depois de aplicar a atualizacao.`,
   cdnMinimumSizePadding: ""
 };
 

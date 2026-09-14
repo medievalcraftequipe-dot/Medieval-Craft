@@ -382,7 +382,7 @@ function registerIpc() {
       sendUpdateProgress({ percent: 100, transferred: 1, total: 1 });
 
       startSilentUpdateInstaller(installerPath);
-      setTimeout(() => app.quit(), 500);
+      setTimeout(exitForUpdate, 500);
       return { ok: true };
     } catch (error) {
       return {
@@ -393,18 +393,25 @@ function registerIpc() {
   });
 }
 
-function quoteBatchValue(value) {
-  return `"${String(value).replace(/%/g, "%%").replace(/"/g, '""')}"`;
+function quotePowerShellValue(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function exitForUpdate() {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.destroy();
+    }
+  }
+
+  app.exit(0);
 }
 
 function startSilentUpdateInstaller(installerPath) {
-  const installerArgs = ["/S", "/currentuser", "--updated", "--force-run"];
   const launcherPath = process.execPath;
-  const launcherDir = path.dirname(launcherPath);
-  const launcherImageName = path.basename(launcherPath);
 
   if (process.platform !== "win32") {
-    const child = spawn(installerPath, installerArgs, {
+    const child = spawn(installerPath, ["/S"], {
       detached: true,
       stdio: "ignore"
     });
@@ -412,52 +419,75 @@ function startSilentUpdateInstaller(installerPath) {
     return;
   }
 
-  const updateScriptPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.cmd`);
+  const updateScriptPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.ps1`);
   const updateLogPath = path.join(os.tmpdir(), "tempest-light-update.log");
+  const installDir = path.dirname(launcherPath);
+  const fallbackLauncherPath = path.join(
+    process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
+    "Programs",
+    "Tempest Light",
+    "Tempest Light.exe"
+  );
   const lines = [
-    "@echo off",
-    "setlocal",
-    `set "TEMPEST_UPDATE_LOG=${updateLogPath.replace(/%/g, "%%").replace(/"/g, "")}"`,
-    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Starting Tempest Light update from PID ${process.pid}.`,
-    "set attempts=120",
-    ":wait_for_exit",
-    `tasklist /fi "PID eq ${process.pid}" 2>nul | findstr /r "\\<${process.pid}\\>" >nul`,
-    "if errorlevel 1 goto run_update",
-    "if \"%attempts%\"==\"0\" goto run_update",
-    "set /a attempts=attempts-1 >nul",
-    "timeout /t 1 /nobreak >nul",
-    "goto wait_for_exit",
-    ":run_update",
-    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Running installer: ${installerPath.replace(/%/g, "%%")}`,
-    `start "" /wait ${quoteBatchValue(installerPath)} ${installerArgs.join(" ")}`,
-    "set install_exit=%errorlevel%",
-    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Installer finished with exit code %install_exit%.`,
-    "timeout /t 2 /nobreak >nul",
-    "set launch_attempts=30",
-    ":launch_app",
-    `if not exist ${quoteBatchValue(launcherPath)} goto wait_to_retry_launch`,
-    `start "" /d ${quoteBatchValue(launcherDir)} ${quoteBatchValue(launcherPath)} --updated`,
-    "timeout /t 2 /nobreak >nul",
-    `tasklist /fi "imagename eq ${launcherImageName}" 2>nul | find /i ${quoteBatchValue(launcherImageName)} >nul`,
-    "if not errorlevel 1 goto cleanup",
-    "if \"%launch_attempts%\"==\"0\" goto cleanup",
-    "set /a launch_attempts=launch_attempts-1 >nul",
-    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Waiting to relaunch Tempest Light. Attempts left: %launch_attempts%.`,
-    ":wait_to_retry_launch",
-    "timeout /t 1 /nobreak >nul",
-    "goto launch_app",
-    ":cleanup",
-    `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Update helper finished.`,
-    "del \"%~f0\" >nul 2>nul"
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$logPath = ${quotePowerShellValue(updateLogPath)}`,
+    "function Write-TempestUpdateLog([string] $message) {",
+    "  $stamp = Get-Date -Format o",
+    "  Add-Content -LiteralPath $logPath -Value \"[$stamp] $message\"",
+    "}",
+    `Write-TempestUpdateLog 'Starting update helper from PID ${process.pid}.'`,
+    `try { Wait-Process -Id ${process.pid} -Timeout 120 } catch {}`,
+    `$installerPath = ${quotePowerShellValue(installerPath)}`,
+    `$installDir = ${quotePowerShellValue(installDir)}`,
+    `$launcherCandidates = @(${quotePowerShellValue(launcherPath)}, ${quotePowerShellValue(fallbackLauncherPath)}) | Select-Object -Unique`,
+    "$installerArguments = '/S /currentuser /D=' + $installDir",
+    "Write-TempestUpdateLog \"Running installer: $installerPath $installerArguments\"",
+    "$installerProcess = Start-Process -FilePath $installerPath -ArgumentList $installerArguments -PassThru -Wait -WindowStyle Hidden",
+    "$installerExitCode = if ($installerProcess) { $installerProcess.ExitCode } else { $LASTEXITCODE }",
+    "Write-TempestUpdateLog \"Installer finished with exit code $installerExitCode.\"",
+    "Start-Sleep -Seconds 2",
+    "$launched = $false",
+    "for ($attempt = 1; $attempt -le 60 -and -not $launched; $attempt += 1) {",
+    "  foreach ($launcherPath in $launcherCandidates) {",
+    "    if (-not (Test-Path -LiteralPath $launcherPath)) { continue }",
+    "    $launcherDir = Split-Path -Parent $launcherPath",
+    "    Write-TempestUpdateLog \"Launching Tempest Light from $launcherPath. Attempt $attempt.\"",
+    "    $startedProcess = Start-Process -FilePath $launcherPath -ArgumentList @('--updated') -WorkingDirectory $launcherDir -PassThru",
+    "    Start-Sleep -Seconds 3",
+    "    $processName = [System.IO.Path]::GetFileNameWithoutExtension($launcherPath)",
+    "    $running = Get-Process -Name $processName | Select-Object -First 1",
+    "    if (($startedProcess -and -not $startedProcess.HasExited) -or $running) {",
+    "      Write-TempestUpdateLog 'Tempest Light relaunched successfully.'",
+    "      $launched = $true",
+    "      break",
+    "    }",
+    "  }",
+    "  if (-not $launched) { Start-Sleep -Seconds 1 }",
+    "}",
+    "if (-not $launched) { Write-TempestUpdateLog 'Failed to relaunch Tempest Light after update.' }",
+    "Write-TempestUpdateLog 'Update helper finished.'",
+    "Remove-Item -LiteralPath $PSCommandPath -Force"
   ];
 
   fs.writeFileSync(updateScriptPath, lines.join(os.EOL), "utf8");
 
-  const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", quoteBatchValue(updateScriptPath)], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
-  });
+  const powerShellPath = path.join(
+    process.env.SystemRoot || "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const powerShellExecutable = fs.existsSync(powerShellPath) ? powerShellPath : "powershell.exe";
+  const child = spawn(
+    powerShellExecutable,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", updateScriptPath],
+    {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    }
+  );
   child.unref();
 }
 
