@@ -400,6 +400,7 @@ function quoteBatchValue(value) {
 function startSilentUpdateInstaller(installerPath) {
   const installerArgs = ["/S", "/currentuser", "--updated", "--force-run"];
   const launcherPath = process.execPath;
+  const launcherDir = path.dirname(launcherPath);
   const launcherImageName = path.basename(launcherPath);
 
   if (process.platform !== "win32") {
@@ -434,13 +435,15 @@ function startSilentUpdateInstaller(installerPath) {
     "timeout /t 2 /nobreak >nul",
     "set launch_attempts=30",
     ":launch_app",
-    `if exist ${quoteBatchValue(launcherPath)} start "" ${quoteBatchValue(launcherPath)} --updated`,
+    `if not exist ${quoteBatchValue(launcherPath)} goto wait_to_retry_launch`,
+    `start "" /d ${quoteBatchValue(launcherDir)} ${quoteBatchValue(launcherPath)} --updated`,
     "timeout /t 2 /nobreak >nul",
     `tasklist /fi "imagename eq ${launcherImageName}" 2>nul | find /i ${quoteBatchValue(launcherImageName)} >nul`,
     "if not errorlevel 1 goto cleanup",
     "if \"%launch_attempts%\"==\"0\" goto cleanup",
     "set /a launch_attempts=launch_attempts-1 >nul",
     `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Waiting to relaunch Tempest Light. Attempts left: %launch_attempts%.`,
+    ":wait_to_retry_launch",
     "timeout /t 1 /nobreak >nul",
     "goto launch_app",
     ":cleanup",

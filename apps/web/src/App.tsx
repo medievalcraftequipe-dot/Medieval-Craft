@@ -100,7 +100,10 @@ const WORKSPACE_STATE_PREFIX = "tempestLight.workspace";
 const MENTION_NOTIFICATIONS_KEY = "tempestLight.mentionNotifications";
 const LOCAL_PROFILE_IMAGES_PREFIX = "tempestLight.localProfileImages";
 const LOCAL_DEVELOPER_TOOLS_ENABLED = import.meta.env.VITE_ENABLE_LOCAL_DEVELOPER_TOOLS === "true";
-const GIPHY_API_KEY = String(import.meta.env.VITE_TEMPEST_LIGHT_GIPHY_API_KEY || import.meta.env.VITE_GIPHY_API_KEY || "").trim();
+const DEFAULT_GIPHY_API_KEY = "aIJDDiepcInIexNEKTsO3lwQ0qEIcGcY";
+const GIPHY_API_KEY = String(
+  import.meta.env.VITE_TEMPEST_LIGHT_GIPHY_API_KEY || import.meta.env.VITE_GIPHY_API_KEY || DEFAULT_GIPHY_API_KEY
+).trim();
 const termsOfUseSections = [
   {
     title: "1. Conta e acesso",

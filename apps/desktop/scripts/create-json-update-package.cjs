@@ -55,7 +55,7 @@ const manifest = {
   sha256: packageSha256,
   publishedAt,
   changelog:
-    `Atualizacao do Tempest Light v${version}: o atualizador agora instala em modo silencioso e reabre o programa automaticamente depois que a atualizacao termina.`,
+    `Atualizacao do Tempest Light v${version}: GIFs online continuam ativos depois da atualizacao e o instalador reforca a reabertura automatica do programa.`,
   cdnMinimumSizePadding: ""
 };
 
