@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Patch, Post, Query, Req, Res, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import type { Request, Response } from "express";
 import type { AuthenticatedRequest } from "../../common/auth/authenticated-request";
 import { AuthService } from "./auth.service";
@@ -20,16 +21,19 @@ export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
   @Post("register")
+  @Throttle({ default: { limit: 4, ttl: 60_000, blockDuration: 10 * 60_000 } })
   register(@Body() dto: RegisterDto) {
     return this.auth.register(dto);
   }
 
   @Post("login")
+  @Throttle({ default: { limit: 8, ttl: 60_000, blockDuration: 5 * 60_000 } })
   login(@Body() dto: LoginDto, @Req() request: Request) {
     return this.auth.login(dto, this.getClientMetadata(request));
   }
 
   @Post("verify-email")
+  @Throttle({ default: { limit: 12, ttl: 60_000, blockDuration: 5 * 60_000 } })
   verifyEmail(@Body() dto: VerifyEmailDto) {
     return this.auth.verifyEmail(dto);
   }
@@ -64,23 +68,27 @@ export class AuthController {
   }
 
   @Post("resend-verification")
+  @Throttle({ default: { limit: 3, ttl: 60_000, blockDuration: 15 * 60_000 } })
   resendVerification(@Body() dto: ResendVerificationDto) {
     return this.auth.resendVerification(dto);
   }
 
   @Post("password-reset/request")
-  requestPasswordReset(@Body() dto: RequestPasswordResetDto) {
-    return this.auth.requestPasswordReset(dto);
+  @Throttle({ default: { limit: 3, ttl: 60_000, blockDuration: 15 * 60_000 } })
+  requestPasswordReset(@Body() dto: RequestPasswordResetDto, @Req() request: Request) {
+    return this.auth.requestPasswordReset(dto, this.getClientMetadata(request));
   }
 
   @Post("password-reset/verify")
-  verifyPasswordResetCode(@Body() dto: VerifyPasswordResetCodeDto) {
-    return this.auth.verifyPasswordResetCode(dto);
+  @Throttle({ default: { limit: 6, ttl: 60_000, blockDuration: 15 * 60_000 } })
+  verifyPasswordResetCode(@Body() dto: VerifyPasswordResetCodeDto, @Req() request: Request) {
+    return this.auth.verifyPasswordResetCode(dto, this.getClientMetadata(request));
   }
 
   @Post("password-reset/confirm")
-  confirmPasswordReset(@Body() dto: ConfirmPasswordResetDto) {
-    return this.auth.confirmPasswordReset(dto);
+  @Throttle({ default: { limit: 4, ttl: 60_000, blockDuration: 15 * 60_000 } })
+  confirmPasswordReset(@Body() dto: ConfirmPasswordResetDto, @Req() request: Request) {
+    return this.auth.confirmPasswordReset(dto, this.getClientMetadata(request));
   }
 
   @Get("me")
@@ -97,44 +105,63 @@ export class AuthController {
 
   @Post("me/stars")
   @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 12, ttl: 60_000, blockDuration: 5 * 60_000 } })
   addStars(@Body() dto: AddStarBalanceDto, @Req() request: AuthenticatedRequest) {
-    return this.auth.addDeveloperStars(request.user.id, dto.amount);
+    return this.auth.addDeveloperStars(request.user.id, dto.amount, this.getClientMetadata(request));
   }
 
   @Patch("me/email")
   @UseGuards(JwtAuthGuard)
   changeEmail(@Body() dto: ChangeEmailDto, @Req() request: AuthenticatedRequest) {
-    return this.auth.changeEmail(request.user.id, dto);
+    return this.auth.changeEmail(request.user.id, request.user.sessionId, dto, this.getClientMetadata(request));
   }
 
   @Patch("me/password")
   @UseGuards(JwtAuthGuard)
   changePassword(@Body() dto: ChangePasswordDto, @Req() request: AuthenticatedRequest) {
-    return this.auth.changePassword(request.user.id, request.user.sessionId, dto);
+    return this.auth.changePassword(request.user.id, request.user.sessionId, dto, this.getClientMetadata(request));
   }
 
   @Post("me/two-factor/setup")
   @UseGuards(JwtAuthGuard)
   setupTwoFactor(@Body() dto: SetupTwoFactorDto, @Req() request: AuthenticatedRequest) {
-    return this.auth.setupTwoFactor(request.user.id, dto);
+    return this.auth.setupTwoFactor(request.user.id, dto, this.getClientMetadata(request));
   }
 
   @Post("me/two-factor/enable")
   @UseGuards(JwtAuthGuard)
   enableTwoFactor(@Body() dto: EnableTwoFactorDto, @Req() request: AuthenticatedRequest) {
-    return this.auth.enableTwoFactor(request.user.id, dto);
+    return this.auth.enableTwoFactor(request.user.id, request.user.sessionId, dto, this.getClientMetadata(request));
   }
 
   @Post("me/two-factor/disable")
   @UseGuards(JwtAuthGuard)
   disableTwoFactor(@Body() dto: DisableTwoFactorDto, @Req() request: AuthenticatedRequest) {
-    return this.auth.disableTwoFactor(request.user.id, dto);
+    return this.auth.disableTwoFactor(request.user.id, request.user.sessionId, dto, this.getClientMetadata(request));
+  }
+
+  @Get("me/sessions")
+  @UseGuards(JwtAuthGuard)
+  listSessions(@Req() request: AuthenticatedRequest) {
+    return this.auth.listSessions(request.user.id, request.user.sessionId);
+  }
+
+  @Delete("me/sessions")
+  @UseGuards(JwtAuthGuard)
+  revokeOtherSessions(@Req() request: AuthenticatedRequest) {
+    return this.auth.revokeOtherSessions(request.user.id, request.user.sessionId, this.getClientMetadata(request));
+  }
+
+  @Delete("me/sessions/:sessionId")
+  @UseGuards(JwtAuthGuard)
+  revokeSession(@Param("sessionId") sessionId: string, @Req() request: AuthenticatedRequest) {
+    return this.auth.revokeSession(request.user.id, request.user.sessionId, sessionId, this.getClientMetadata(request));
   }
 
   @Post("logout")
   @UseGuards(JwtAuthGuard)
   logout(@Req() request: AuthenticatedRequest) {
-    return this.auth.logout(request.user.id, request.user.sessionId);
+    return this.auth.logout(request.user.id, request.user.sessionId, this.getClientMetadata(request));
   }
 
   @Delete("me")

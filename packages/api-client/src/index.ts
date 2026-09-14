@@ -3,6 +3,7 @@ import type {
   AddServerStarsResponse,
   AddStarBalanceInput,
   AuthResponse,
+  AuthSessionsResponse,
   AuthUser,
   BanServerMemberInput,
   ChangeEmailInput,
@@ -53,6 +54,8 @@ import type {
   RegisterResponse,
   ResendVerificationInput,
   ResendVerificationResponse,
+  RevokeAuthSessionResponse,
+  RevokeOtherAuthSessionsResponse,
   SendServerMessageInput,
   SendDirectMessageInput,
   ServerMessageResponse,
@@ -91,6 +94,9 @@ export interface TempestLightApiClient {
   verifyPasswordResetCode(input: PasswordResetVerifyInput): Promise<PasswordResetVerifyResponse>;
   confirmPasswordReset(input: PasswordResetConfirmInput): Promise<PasswordResetConfirmResponse>;
   me(): Promise<AuthUser>;
+  listSessions(): Promise<AuthSessionsResponse>;
+  revokeSession(sessionId: string): Promise<RevokeAuthSessionResponse>;
+  revokeOtherSessions(): Promise<RevokeOtherAuthSessionsResponse>;
   updateMe(input: UpdateProfileInput): Promise<AuthUser>;
   addStarBalance(input: AddStarBalanceInput): Promise<StarBalanceResponse>;
   changeEmail(input: ChangeEmailInput): Promise<AuthUser>;
@@ -236,8 +242,17 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
       request<PasswordResetConfirmResponse>("/auth/password-reset/confirm", {
         method: "POST",
         body: JSON.stringify(input)
-      }),
+    }),
     me: () => request<AuthUser>("/auth/me"),
+    listSessions: () => request<AuthSessionsResponse>("/auth/me/sessions"),
+    revokeSession: (sessionId) =>
+      request<RevokeAuthSessionResponse>(`/auth/me/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE"
+      }),
+    revokeOtherSessions: () =>
+      request<RevokeOtherAuthSessionsResponse>("/auth/me/sessions", {
+        method: "DELETE"
+      }),
     updateMe: (input) =>
       request<AuthUser>("/auth/me", {
         method: "PATCH",

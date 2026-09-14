@@ -110,6 +110,8 @@ model User {
   profilePosts            ProfilePost[]         @relation("ProfilePostAuthor")
   reactions               Reaction[]
   receivedFriendRequests  FriendRequest[]      @relation("FriendRequestReceiver")
+  securityEventsAsActor   SecurityEvent[]      @relation("SecurityEventActor")
+  securityEventsAsTarget  SecurityEvent[]      @relation("SecurityEventTarget")
   serverLikes             ServerLike[]
   serverChannelMessages   ServerChannelMessage[]
   serverVoiceSessions     ServerVoiceSession[]
@@ -121,6 +123,38 @@ model User {
 
   @@index([presence])
   @@index([createdAt])
+}
+
+model AuthAttempt {
+  id             String   @id @default(cuid())
+  scope          String
+  identifierHash String
+  ipHash         String?
+  userId         String?
+  success        Boolean  @default(false)
+  reason         String?
+  createdAt      DateTime @default(now())
+
+  @@index([scope, identifierHash, createdAt])
+  @@index([scope, ipHash, createdAt])
+  @@index([userId, createdAt])
+}
+
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  action    String
+  actorId   String?
+  targetId  String?
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+  actor     User?    @relation("SecurityEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  target    User?    @relation("SecurityEventTarget", fields: [targetId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetId, createdAt])
 }
 
 model EmailVerificationToken {

@@ -12,9 +12,26 @@ type InviteDuration = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
 const voiceSessionTtlMs = 8 * 60_000;
 const voiceSignalTtlMs = 5 * 60_000;
 const channelNameMaxLength = 100;
+const serverMessageMaxLength = 4_000;
+const clientStateMaxBytes = 12 * 1024 * 1024;
+const voiceSignalPayloadMaxBytes = 24 * 1024;
+const mentionsPayloadMaxBytes = 16 * 1024;
 const maxServerStarSupportAmount = 25;
 const fallbackDeveloperEmails = ["rafaeltanki1212@gmail.com", "izigamer47@gmail.com"];
 const fallbackDeveloperUsernames = ["armadura_prime"];
+const protectedPermissionKeys = new Set([
+  "administrator",
+  "manage_server",
+  "manage_roles",
+  "kick_members",
+  "ban_members",
+  "moderate_members",
+  "manage_messages",
+  "mention_everyone",
+  "mute_members",
+  "deafen_members",
+  "move_members"
+]);
 
 @Injectable()
 export class ServersService {
@@ -120,6 +137,7 @@ export class ServersService {
   }
 
   async createServer(userId: string, rawState: ClientServerState) {
+    this.assertJsonByteLength(rawState, clientStateMaxBytes, "estado do servidor");
     const user = await this.getUser(userId);
     const serverId = this.readOptionalString(rawState.id) ?? `srv_${randomBytes(9).toString("hex")}`;
     const state = this.mergeCurrentUserMember({ ...rawState, id: serverId, ownerId: userId }, user, new Date(), true);
@@ -153,17 +171,22 @@ export class ServersService {
 
   async updateServerState(userId: string, serverId: string, rawState: ClientServerState) {
     const server = await this.getServerForMember(serverId, userId);
-    if (!(await this.canManageServer(server, userId))) {
+    this.assertJsonByteLength(rawState, clientStateMaxBytes, "estado do servidor");
+
+    const user = await this.getUser(userId);
+    const currentState = this.presentServerState(server);
+    const trustedActor = server.ownerId === userId || this.isDeveloperAccount(user);
+    const actorCanManageState =
+      trustedActor || this.userHasStatePermission(currentState, userId, ["administrator", "manage_server", "manage_channels", "manage_roles"]);
+    const actorCanManageRoles = trustedActor || this.userHasStatePermission(currentState, userId, ["administrator", "manage_roles"]);
+
+    if (!actorCanManageState) {
       throw new ForbiddenException("Seu cargo nao permite salvar configuracoes deste servidor.");
     }
 
-    const user = await this.getUser(userId);
-    const currentMembership = server.members.find((member) => member.userId === userId);
-    const state = this.mergeCurrentUserMember(
-      { ...rawState, id: serverId, ownerId: server.ownerId },
-      user,
-      currentMembership?.joinedAt ?? new Date(),
-      server.ownerId === userId
+    const state = this.mergeDatabaseMembers(
+      this.sanitizeServerStateForActor({ ...currentState, ...rawState, id: serverId, ownerId: server.ownerId }, currentState, userId, trustedActor, actorCanManageRoles),
+      server
     );
     const updated = await this.prisma.server.update({
       where: { id: serverId },
@@ -743,11 +766,12 @@ export class ServersService {
   }
 
   async listMessages(userId: string, serverId: string, channelName: string, after?: string) {
-    await this.ensureMember(serverId, userId);
+    const server = await this.getServerForMember(serverId, userId);
     const cleanChannelName = (channelName ?? "").trim().slice(0, channelNameMaxLength);
     if (!cleanChannelName) {
       throw new BadRequestException("Canal obrigatorio.");
     }
+    this.assertCanUseServerChannel(server, userId, cleanChannelName, "TEXT", ["read_message_history"]);
 
     const afterDate = after ? new Date(after) : null;
     const messages = await this.prisma.serverChannelMessage.findMany({
@@ -765,14 +789,20 @@ export class ServersService {
   }
 
   async sendMessage(userId: string, serverId: string, channelName: string, content: string, mentions?: Record<string, unknown>) {
-    const member = await this.ensureMember(serverId, userId);
+    const server = await this.getServerForMember(serverId, userId);
+    const member = server.members.find((item) => item.userId === userId);
+    if (!member) {
+      throw new ForbiddenException("Voce nao participa deste servidor.");
+    }
     this.assertNotTimedOut(member);
 
     const cleanChannelName = channelName.trim().slice(0, channelNameMaxLength);
-    const cleanContent = content.trim();
+    const cleanContent = this.cleanMessageContent(content);
     if (!cleanChannelName || !cleanContent) {
       throw new BadRequestException("Canal e mensagem sao obrigatorios.");
     }
+    this.assertCanUseServerChannel(server, userId, cleanChannelName, "TEXT", ["send_messages"]);
+    const safeMentions = await this.sanitizeMessageMentions(server, userId, cleanContent, mentions);
 
     const message = await this.prisma.serverChannelMessage.create({
       data: {
@@ -780,12 +810,12 @@ export class ServersService {
         channelName: cleanChannelName,
         authorId: userId,
         content: cleanContent,
-        mentions: mentions ? this.toInputJson(mentions) : undefined
+        mentions: safeMentions ? this.toInputJson(safeMentions) : undefined
       },
       include: { author: true }
     });
 
-    await this.createMentionNotifications(serverId, cleanChannelName, message, mentions);
+    await this.createMentionNotifications(serverId, cleanChannelName, message, safeMentions ?? undefined);
 
     return { message: this.presentServerMessage(message) };
   }
@@ -834,13 +864,14 @@ export class ServersService {
   }
 
   async upsertVoiceState(userId: string, serverId: string, channelName: string, muted = false, speaking = false) {
-    await this.ensureMember(serverId, userId);
+    const server = await this.getServerForMember(serverId, userId);
     await this.pruneStaleVoiceSessions();
 
     const cleanChannelName = (channelName ?? "").trim().slice(0, channelNameMaxLength);
     if (!cleanChannelName) {
       throw new BadRequestException("Canal de voz obrigatorio.");
     }
+    this.assertCanUseServerChannel(server, userId, cleanChannelName, "VOICE", ["connect"]);
 
     const state = await this.prisma.serverVoiceSession.upsert({
       where: {
@@ -877,7 +908,7 @@ export class ServersService {
   }
 
   async listVoiceStates(userId: string, serverId: string) {
-    await this.ensureMember(serverId, userId);
+    const server = await this.getServerForMember(serverId, userId);
     await this.pruneStaleVoiceSessions();
 
     const sessions = await this.prisma.serverVoiceSession.findMany({
@@ -886,7 +917,11 @@ export class ServersService {
       orderBy: { joinedAt: "asc" }
     });
 
-    return { voiceStates: sessions.map((session) => this.presentVoiceState(session)) };
+    return {
+      voiceStates: sessions
+        .filter((session) => this.canUseServerChannel(server, userId, session.channelName, "VOICE", []))
+        .map((session) => this.presentVoiceState(session))
+    };
   }
 
   async sendVoiceSignal(
@@ -901,14 +936,16 @@ export class ServersService {
       throw new BadRequestException("Nao e possivel sinalizar para a propria conta.");
     }
 
-    await this.ensureMember(serverId, userId);
+    const server = await this.getServerForMember(serverId, userId);
     await this.ensureMember(serverId, toUserId);
     await this.pruneOldVoiceSignals();
+    this.assertJsonByteLength(payload, voiceSignalPayloadMaxBytes, "sinal de voz");
 
     const cleanChannelName = (channelName ?? "").trim().slice(0, channelNameMaxLength);
     if (!cleanChannelName) {
       throw new BadRequestException("Canal de voz obrigatorio.");
     }
+    this.assertCanUseServerChannel(server, userId, cleanChannelName, "VOICE", ["connect"]);
 
     const signal = await this.prisma.voiceSignal.create({
       data: {
@@ -926,13 +963,14 @@ export class ServersService {
   }
 
   async listVoiceSignals(userId: string, serverId: string, channelName: string, after?: string) {
-    await this.ensureMember(serverId, userId);
+    const server = await this.getServerForMember(serverId, userId);
     await this.pruneOldVoiceSignals();
 
     const cleanChannelName = (channelName ?? "").trim().slice(0, channelNameMaxLength);
     if (!cleanChannelName) {
       throw new BadRequestException("Canal de voz obrigatorio.");
     }
+    this.assertCanUseServerChannel(server, userId, cleanChannelName, "VOICE", ["connect"]);
 
     const afterDate = after ? new Date(after) : null;
     const signals = await this.prisma.voiceSignal.findMany({
@@ -1105,7 +1143,7 @@ export class ServersService {
     const databaseMemberIds = new Set(server.members.map((membership) => membership.userId));
 
     for (const membership of server.members) {
-      const existing = memberById.get(membership.userId) ?? {};
+      const existing = this.stripMemberPrivateFields(memberById.get(membership.userId) ?? {});
       memberById.set(membership.userId, {
         ...existing,
         id: membership.user.id,
@@ -1136,8 +1174,9 @@ export class ServersService {
     const members = Array.isArray(state.members) ? state.members.filter((member) => this.isRecord(member)) : [];
     const roleIds = owner ? this.getOwnerRoleIds(state, user.id) : ["everyone"];
     const existingIndex = members.findIndex((member) => member.id === user.id);
+    const existing = existingIndex >= 0 ? this.stripMemberPrivateFields(members[existingIndex]) : {};
     const member = {
-      ...(existingIndex >= 0 ? members[existingIndex] : {}),
+      ...existing,
       id: user.id,
       username: user.username,
       displayName: user.displayName,
@@ -1172,6 +1211,281 @@ export class ServersService {
     const roles = Array.isArray(state.roles) ? state.roles.filter((role) => this.isRecord(role)) : [];
     const adminRole = roles.find((role) => this.permissionsContain(role.permissions, "administrator"));
     return adminRole?.id ? ["everyone", String(adminRole.id)] : ["everyone"];
+  }
+
+  private sanitizeServerStateForActor(
+    rawState: ClientServerState,
+    currentState: ClientServerState,
+    actorId: string,
+    trustedActor: boolean,
+    actorCanManageRoles: boolean
+  ): ClientServerState {
+    const state: ClientServerState = this.isRecord(rawState) ? { ...rawState } : {};
+    state.id = currentState.id;
+    state.ownerId = currentState.ownerId;
+
+    const roles = this.sanitizeStateRoles(state.roles, currentState, trustedActor, actorCanManageRoles);
+    state.roles = roles;
+    state.members = this.sanitizeStateMembers(state.members, currentState, actorId, trustedActor, actorCanManageRoles, roles);
+
+    for (const protectedKey of ["invites", "bans", "timeouts", "likeCount", "likedByMe", "boosts", "auditLogs"]) {
+      if (protectedKey in currentState) {
+        state[protectedKey] = currentState[protectedKey];
+      } else {
+        delete state[protectedKey];
+      }
+    }
+
+    return state;
+  }
+
+  private sanitizeStateRoles(
+    rawRoles: unknown,
+    currentState: ClientServerState,
+    trustedActor: boolean,
+    actorCanManageRoles: boolean
+  ): Array<Record<string, unknown>> {
+    const currentRoles = this.readRecordArray(currentState.roles);
+    if (!actorCanManageRoles || !Array.isArray(rawRoles)) {
+      return currentRoles;
+    }
+
+    const currentById = new Map(currentRoles.map((role) => [String(role.id), role]));
+    const seen = new Set<string>();
+    const nextRoles = this.readRecordArray(rawRoles)
+      .slice(0, 100)
+      .reduce<Array<Record<string, unknown>>>((items, role) => {
+        const id = this.readOptionalString(role.id);
+        if (!id || seen.has(id)) {
+          return items;
+        }
+        seen.add(id);
+
+        const currentRole = currentById.get(id);
+        const isDefault = Boolean(currentRole?.isDefault) || id === "everyone";
+        const permissions = this.sanitizeRolePermissions(role.permissions, currentRole?.permissions, trustedActor, isDefault);
+        items.push({
+          ...currentRole,
+          ...role,
+          id,
+          name: this.readOptionalString(role.name)?.slice(0, 64) ?? this.readOptionalString(currentRole?.name) ?? "Cargo",
+          color: this.normalizeRoleColor(role.color) ?? this.normalizeRoleColor(currentRole?.color) ?? "#99aab5",
+          iconUrl: this.readOptionalString(role.iconUrl),
+          permissions,
+          mentionsEnabled: typeof role.mentionsEnabled === "boolean" ? role.mentionsEnabled : currentRole?.mentionsEnabled,
+          separateMembers: typeof role.separateMembers === "boolean" ? role.separateMembers : currentRole?.separateMembers,
+          isDefault
+        });
+        return items;
+      }, []);
+
+    for (const currentRole of currentRoles) {
+      const id = this.readOptionalString(currentRole.id);
+      if (id && !seen.has(id) && currentRole.isDefault === true) {
+        nextRoles.unshift(currentRole);
+      }
+    }
+
+    return nextRoles;
+  }
+
+  private sanitizeStateMembers(
+    rawMembers: unknown,
+    currentState: ClientServerState,
+    actorId: string,
+    trustedActor: boolean,
+    actorCanManageRoles: boolean,
+    roles: Array<Record<string, unknown>>
+  ) {
+    const currentMembers = this.readRecordArray(currentState.members);
+    if (!actorCanManageRoles || !Array.isArray(rawMembers)) {
+      return currentMembers;
+    }
+
+    const currentById = new Map(currentMembers.map((member) => [String(member.id), member]));
+    const rawById = new Map(
+      this.readRecordArray(rawMembers)
+        .filter((member) => this.readOptionalString(member.id))
+        .map((member) => [String(member.id), member])
+    );
+    const allowedRoleIds = new Set(roles.map((role) => this.readOptionalString(role.id)).filter((id): id is string => Boolean(id)));
+    const protectedRoleIds = new Set(
+      roles
+        .filter((role) => this.roleHasProtectedPermission(role))
+        .map((role) => this.readOptionalString(role.id))
+        .filter((id): id is string => Boolean(id))
+    );
+
+    return currentMembers.map((currentMember) => {
+      const safeCurrentMember = this.stripMemberPrivateFields(currentMember);
+      const memberId = this.readOptionalString(currentMember.id);
+      if (!memberId) {
+        return safeCurrentMember;
+      }
+
+      const rawMember = this.stripMemberPrivateFields(rawById.get(memberId) ?? currentMember);
+      const currentRoleIds = this.normalizeRoleIds(safeCurrentMember.roleIds, allowedRoleIds);
+      if (trustedActor) {
+        return {
+          ...safeCurrentMember,
+          ...rawMember,
+          id: memberId,
+          roleIds: this.normalizeRoleIds(rawMember.roleIds, allowedRoleIds)
+        };
+      }
+
+      if (memberId === actorId) {
+        return { ...currentMember, roleIds: currentRoleIds };
+      }
+
+      const requestedRoleIds = this.normalizeRoleIds(rawMember.roleIds, allowedRoleIds);
+      const currentProtectedRoleIds = currentRoleIds.filter((roleId) => protectedRoleIds.has(roleId));
+      const requestedNonProtectedRoleIds = requestedRoleIds.filter((roleId) => !protectedRoleIds.has(roleId));
+      return {
+        ...safeCurrentMember,
+        ...rawMember,
+        id: memberId,
+        roleIds: Array.from(new Set(["everyone", ...requestedNonProtectedRoleIds, ...currentProtectedRoleIds]))
+      };
+    });
+  }
+
+  private sanitizeRolePermissions(rawPermissions: unknown, currentPermissions: unknown, trustedActor: boolean, isDefault: boolean) {
+    const requested = this.readPermissionRecord(rawPermissions);
+    const current = this.readPermissionRecord(currentPermissions);
+    const permissions: Record<string, boolean> = { ...requested };
+
+    for (const key of protectedPermissionKeys) {
+      if (isDefault) {
+        permissions[key] = false;
+      } else if (!trustedActor) {
+        permissions[key] = Boolean(current[key]);
+      }
+    }
+
+    return permissions;
+  }
+
+  private readPermissionRecord(value: unknown): Record<string, boolean> {
+    if (Array.isArray(value)) {
+      return Object.fromEntries(this.readStringArray(value).map((permission) => [permission, true]));
+    }
+
+    if (!this.isRecord(value)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key, item]) => typeof key === "string" && key.length <= 80 && typeof item === "boolean")
+        .map(([key, item]) => [key, item])
+    ) as Record<string, boolean>;
+  }
+
+  private roleHasProtectedPermission(role: Record<string, unknown>) {
+    const permissions = this.readPermissionRecord(role.permissions);
+    return Array.from(protectedPermissionKeys).some((permission) => permissions[permission] === true);
+  }
+
+  private stripMemberPrivateFields(member: Record<string, unknown>): Record<string, unknown> {
+    const {
+      accessToken: _accessToken,
+      birthDate: _birthDate,
+      blockNonFriendDirectMessages: _blockNonFriendDirectMessages,
+      botToken: _botToken,
+      email: _email,
+      emailVerifiedAt: _emailVerifiedAt,
+      passwordHash: _passwordHash,
+      resetToken: _resetToken,
+      sessionId: _sessionId,
+      starBalance: _starBalance,
+      status: _status,
+      token: _token,
+      twoFactorEnabled: _twoFactorEnabled,
+      twoFactorSecret: _twoFactorSecret,
+      ...publicMember
+    } = member;
+    return publicMember;
+  }
+
+  private normalizeRoleIds(value: unknown, allowedRoleIds: Set<string>) {
+    const roleIds = this.readStringArray(value)
+      .map((roleId) => roleId.trim())
+      .filter((roleId) => roleId === "everyone" || allowedRoleIds.has(roleId));
+    return Array.from(new Set(["everyone", ...roleIds.filter((roleId) => roleId !== "everyone")]));
+  }
+
+  private normalizeRoleColor(value: unknown) {
+    return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value.trim()) ? value.trim() : null;
+  }
+
+  private assertCanUseServerChannel(
+    server: { ownerId: string; clientState: unknown },
+    userId: string,
+    channelName: string,
+    expectedType: "TEXT" | "VOICE",
+    permissions: string[]
+  ) {
+    const result = this.getServerChannelAccess(server, userId, channelName, expectedType, permissions);
+    if (!result.exists) {
+      throw new NotFoundException("Canal nao encontrado neste servidor.");
+    }
+
+    if (!result.typeMatches) {
+      throw new ForbiddenException("Tipo de canal invalido para esta acao.");
+    }
+
+    if (!result.allowed) {
+      throw new ForbiddenException("Seu cargo nao permite acessar este canal.");
+    }
+  }
+
+  private canUseServerChannel(
+    server: { ownerId: string; clientState: unknown },
+    userId: string,
+    channelName: string,
+    expectedType: "TEXT" | "VOICE",
+    permissions: string[]
+  ) {
+    return this.getServerChannelAccess(server, userId, channelName, expectedType, permissions).allowed;
+  }
+
+  private getServerChannelAccess(
+    server: { ownerId: string; clientState: unknown },
+    userId: string,
+    channelName: string,
+    expectedType: "TEXT" | "VOICE",
+    permissions: string[]
+  ) {
+    const state = this.isRecord(server.clientState) ? server.clientState : {};
+    const channel = this.findStateChannel(state, channelName);
+    if (!channel) {
+      return { exists: false, typeMatches: false, allowed: false };
+    }
+
+    const expected = expectedType.toLowerCase();
+    const type = String(channel.type ?? "").trim().toLowerCase();
+    const typeMatches = type === expected;
+    if (!typeMatches) {
+      return { exists: true, typeMatches: false, allowed: false };
+    }
+
+    const privileged = server.ownerId === userId || this.userHasStatePermission(state, userId, ["administrator", "manage_server"]);
+    const canViewPrivate = !channel.isPrivate || privileged || this.userHasStatePermission(state, userId, ["view_private_channels"]);
+    const hasRequestedPermissions =
+      permissions.length === 0 || privileged || this.userHasStatePermission(state, userId, ["administrator", ...permissions]);
+
+    return { exists: true, typeMatches: true, allowed: canViewPrivate && hasRequestedPermissions };
+  }
+
+  private findStateChannel(state: Record<string, unknown>, channelName: string) {
+    const cleanName = channelName.trim().toLowerCase();
+    const channels = [
+      ...this.readRecordArray(state.channels),
+      ...this.readRecordArray(state.categories).flatMap((category) => this.readRecordArray(category.channels))
+    ];
+
+    return channels.find((channel) => this.readOptionalString(channel.name)?.toLowerCase() === cleanName) ?? null;
   }
 
   private async canManageServer(server: { ownerId: string; clientState: unknown }, userId: string) {
@@ -1269,6 +1583,187 @@ export class ServersService {
   private cleanReason(reason?: string) {
     const clean = reason?.trim().slice(0, 180);
     return clean || null;
+  }
+
+  private cleanMessageContent(contentInput: string) {
+    const content = String(contentInput ?? "").replace(/\u0000/g, "").trim();
+    if (!content) {
+      throw new BadRequestException("Mensagem obrigatoria.");
+    }
+
+    if (content.length > serverMessageMaxLength) {
+      throw new BadRequestException(`A mensagem pode ter ate ${serverMessageMaxLength} caracteres.`);
+    }
+
+    return content;
+  }
+
+  private async sanitizeMessageMentions(
+    server: { ownerId: string; clientState: unknown },
+    userId: string,
+    content: string,
+    mentions?: Record<string, unknown>
+  ) {
+    if (mentions) {
+      this.assertJsonByteLength(mentions, mentionsPayloadMaxBytes, "mencoes da mensagem");
+    }
+
+    const state = this.isRecord(server.clientState) ? server.clientState : {};
+    const canMentionRoles =
+      server.ownerId === userId ||
+      this.userHasStatePermission(state, userId, ["administrator", "mention_everyone", "manage_messages", "moderate_members", "kick_members", "ban_members"]);
+    const safeMentions: Record<string, unknown> = {};
+    const mentionItems: Array<Record<string, string>> = [];
+    const recipientMap = new Map<string, { username: string }>();
+    const members = this.readRecordArray(state.members);
+    const roles = this.readRecordArray(state.roles);
+
+    for (const member of members) {
+      const memberId = this.readOptionalString(member.id);
+      const username = this.readOptionalString(member.username);
+      const displayName = this.readOptionalString(member.displayName) ?? username;
+      if (!memberId || !username || !displayName) {
+        continue;
+      }
+
+      const mentionLabel = this.findMentionLabel(content, [username, displayName]);
+      if (!mentionLabel) {
+        continue;
+      }
+
+      mentionItems.push({
+        kind: member.isBot === true ? "bot" : "member",
+        id: memberId,
+        name: displayName,
+        username,
+        label: mentionLabel
+      });
+
+      if (member.isBot !== true && memberId !== userId) {
+        recipientMap.set(memberId, { username: username.toLowerCase() });
+      }
+    }
+
+    if (canMentionRoles) {
+      for (const role of roles) {
+        const roleId = this.readOptionalString(role.id);
+        const roleName = this.readOptionalString(role.name);
+        if (!roleId || !roleName || role.mentionsEnabled === false) {
+          continue;
+        }
+
+        const mentionLabel = this.findMentionLabel(content, [roleName]);
+        if (!mentionLabel) {
+          continue;
+        }
+
+        mentionItems.push({
+          kind: "role",
+          id: roleId,
+          name: roleName,
+          label: mentionLabel
+        });
+
+        const mentionedMembers = role.isDefault === true
+          ? members
+          : members.filter((member) => this.readStringArray(member.roleIds).includes(roleId));
+        for (const member of mentionedMembers) {
+          const memberId = this.readOptionalString(member.id);
+          const username = this.readOptionalString(member.username);
+          if (memberId && username && member.isBot !== true && memberId !== userId) {
+            recipientMap.set(memberId, { username: username.toLowerCase() });
+          }
+        }
+      }
+    }
+
+    if (mentionItems.length) {
+      safeMentions.mentions = mentionItems.slice(0, 60);
+    }
+
+    const recipients = Array.from(recipientMap.entries()).slice(0, 100);
+    if (recipients.length) {
+      safeMentions.mentionedUserIds = recipients.map(([memberId]) => memberId);
+      safeMentions.mentionedUsernames = recipients.map(([, member]) => member.username);
+    }
+
+    const botAuthor = this.readTempestBotAuthor(mentions);
+    if (botAuthor && this.canSendBotAuthoredMessage(server, userId, state, botAuthor)) {
+      safeMentions.tempestBotAuthor = botAuthor;
+    }
+
+    return Object.keys(safeMentions).length ? safeMentions : null;
+  }
+
+  private canSendBotAuthoredMessage(
+    server: { ownerId: string },
+    userId: string,
+    state: Record<string, unknown>,
+    botAuthor: { id: string; username: string; displayName: string; avatarUrl: string | null }
+  ) {
+    const privileged =
+      server.ownerId === userId || this.userHasStatePermission(state, userId, ["administrator", "manage_server", "manage_messages"]);
+    if (!privileged) {
+      return false;
+    }
+
+    const botExistsInMembers = this.readRecordArray(state.members).some((member) => {
+      return member.isBot === true && (member.id === botAuthor.id || member.username === botAuthor.username);
+    });
+    const botExistsInSettings = this.readRecordArray(state.bots).some((bot) => {
+      return bot.id === botAuthor.id || bot.username === botAuthor.username;
+    });
+
+    return botExistsInMembers || botExistsInSettings;
+  }
+
+  private findMentionLabel(text: string, names: string[]) {
+    const aliases = names.flatMap((name) => this.getMentionNameAliases(name)).sort((first, second) => second.length - first.length);
+    const matchedAlias = aliases.find((alias) => this.textMentionsName(text, alias));
+    return matchedAlias ? `@${matchedAlias}` : null;
+  }
+
+  private textMentionsName(text: string, name: string) {
+    const loweredText = text.toLowerCase();
+    const mention = `@${name.trim().replace(/^@+/, "").toLowerCase()}`;
+    if (mention.length <= 1) {
+      return false;
+    }
+
+    let index = loweredText.indexOf(mention);
+    while (index >= 0) {
+      const before = index > 0 ? loweredText[index - 1] : "";
+      const after = loweredText[index + mention.length] ?? "";
+      const hasStartBoundary = !before || /[\s([{:]/.test(before);
+      const hasEndBoundary = !after || /[\s,.;:!?)}\]]/.test(after);
+
+      if (hasStartBoundary && hasEndBoundary) {
+        return true;
+      }
+
+      index = loweredText.indexOf(mention, index + mention.length);
+    }
+
+    return false;
+  }
+
+  private getMentionNameAliases(name: string) {
+    const cleanName = name.trim().replace(/^@+/, "");
+    const words = cleanName.split(/[\s_.-]+/).filter(Boolean);
+    return Array.from(
+      new Set(
+        [
+          cleanName,
+          cleanName.toLowerCase().replace(/[^a-z0-9_.-]/g, ""),
+          words.join(" "),
+          words.join("-"),
+          words.join("_"),
+          words[words.length - 1] ?? ""
+        ]
+          .map((alias) => alias.trim())
+          .filter(Boolean)
+      )
+    );
   }
 
   private findServerMemberByUsername(
@@ -1575,6 +2070,10 @@ export class ServersService {
     return typeof value === "string" && value.trim() ? value.trim() : null;
   }
 
+  private readRecordArray(value: unknown) {
+    return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => this.isRecord(item)) : [];
+  }
+
   private readStringArray(value: unknown, fallback: string[] = []) {
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : fallback;
   }
@@ -1605,6 +2104,13 @@ export class ServersService {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  }
+
+  private assertJsonByteLength(value: unknown, maxBytes: number, label: string) {
+    const size = Buffer.byteLength(JSON.stringify(value ?? {}), "utf8");
+    if (size > maxBytes) {
+      throw new BadRequestException(`O payload de ${label} passou do limite seguro.`);
+    }
   }
 
   private toInputJson(value: Record<string, unknown>) {

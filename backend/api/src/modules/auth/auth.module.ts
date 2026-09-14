@@ -21,6 +21,10 @@ import { JwtAuthGuard } from "./jwt-auth.guard";
           throw new Error("JWT_SECRET is required.");
         }
 
+        if (Buffer.byteLength(secret, "utf8") < 32) {
+          throw new Error("JWT_SECRET must be at least 32 bytes long.");
+        }
+
         return {
           secret,
           signOptions: {

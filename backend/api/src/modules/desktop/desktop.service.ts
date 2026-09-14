@@ -15,6 +15,10 @@ export class DesktopService {
       throw new ForbiddenException("Apenas a conta autorizada de developer pode enviar atualizacoes.");
     }
 
+    if (!user.twoFactorEnabled) {
+      throw new ForbiddenException("Ative a autenticacao em dois fatores antes de publicar atualizacoes.");
+    }
+
     const token = this.readGitHubToken();
     const { owner, repo } = this.readGitHubRepository();
     const workflowId = this.config.get<string>("TEMPEST_LIGHT_RELEASE_WORKFLOW_ID")?.trim() || "release.yml";
@@ -103,6 +107,10 @@ export class DesktopService {
       throw new BadRequestException("TEMPEST_LIGHT_GITHUB_REPOSITORY precisa estar no formato dono/repositorio.");
     }
 
+    if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) {
+      throw new BadRequestException("TEMPEST_LIGHT_GITHUB_REPOSITORY contem caracteres invalidos.");
+    }
+
     return { owner, repo };
   }
 
@@ -112,7 +120,12 @@ export class DesktopService {
       return null;
     }
 
-    return value.replace(/^refs\/heads\//, "");
+    const normalized = value.replace(/^refs\/heads\//, "");
+    if (normalized.length > 100 || normalized.startsWith("-") || normalized.includes("..") || !/^[A-Za-z0-9._/-]+$/.test(normalized)) {
+      throw new BadRequestException("Ref de release invalida.");
+    }
+
+    return normalized;
   }
 
   private normalizeVersion(version?: string) {
@@ -121,7 +134,12 @@ export class DesktopService {
       return null;
     }
 
-    return value.replace(/^v/i, "");
+    const normalized = value.replace(/^v/i, "");
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(normalized)) {
+      throw new BadRequestException("Versao precisa usar SemVer, como 0.1.58.");
+    }
+
+    return normalized;
   }
 
   private async readErrorBody(response: Response) {

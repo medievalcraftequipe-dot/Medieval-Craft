@@ -18,3 +18,17 @@ export function presentAuthUser(user: User) {
     createdAt: user.createdAt.toISOString()
   };
 }
+
+export function presentPublicUser(user: User) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
+    bannerUrl: user.bannerUrl,
+    bio: user.bio,
+    customStatus: user.customStatus,
+    presence: user.presence === "INVISIBLE" ? "OFFLINE" : user.presence,
+    createdAt: user.createdAt.toISOString()
+  };
+}

@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import type { AuthenticatedRequest } from "../../common/auth/authenticated-request";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { CreateProfilePostDto } from "./dto/create-profile-post.dto";
@@ -15,6 +16,7 @@ export class ProfilesController {
   }
 
   @Post("me/posts")
+  @Throttle({ default: { limit: 12, ttl: 60_000, blockDuration: 5 * 60_000 } })
   createMyProfilePost(@Body() dto: CreateProfilePostDto, @Req() request: AuthenticatedRequest) {
     return this.social.createProfilePost(request.user.id, dto.content);
   }
@@ -25,6 +27,7 @@ export class ProfilesController {
   }
 
   @Post("posts/:postId/likes")
+  @Throttle({ default: { limit: 60, ttl: 60_000, blockDuration: 2 * 60_000 } })
   likeProfilePost(@Param("postId") postId: string, @Req() request: AuthenticatedRequest) {
     return this.social.likeProfilePost(request.user.id, postId);
   }
@@ -35,6 +38,7 @@ export class ProfilesController {
   }
 
   @Post(":userId/likes")
+  @Throttle({ default: { limit: 60, ttl: 60_000, blockDuration: 2 * 60_000 } })
   likeProfile(@Param("userId") userId: string, @Req() request: AuthenticatedRequest) {
     return this.social.likeProfile(request.user.id, userId);
   }

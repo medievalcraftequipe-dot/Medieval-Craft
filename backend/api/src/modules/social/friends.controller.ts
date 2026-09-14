@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post, Req, UseGuards } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import type { AuthenticatedRequest } from "../../common/auth/authenticated-request";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { FriendRequestDto } from "./dto/friend-request.dto";
@@ -15,6 +16,7 @@ export class FriendsController {
   }
 
   @Post("requests")
+  @Throttle({ default: { limit: 10, ttl: 60_000, blockDuration: 10 * 60_000 } })
   requestFriendship(@Body() dto: FriendRequestDto, @Req() request: AuthenticatedRequest) {
     return this.social.requestFriendship(request.user.id, dto.username);
   }

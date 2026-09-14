@@ -1,9 +1,9 @@
-import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { hash, verify } from "@node-rs/argon2";
-import type { User } from "@prisma/client";
+import type { Prisma, User } from "@prisma/client";
 import type { AuthenticatedPrincipal } from "../../common/auth/authenticated-request";
 import { MailService } from "../../common/mail/mail.service";
 import { PrismaService } from "../../common/prisma/prisma.service";
@@ -21,6 +21,13 @@ import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { validatePasswordPolicy } from "./password-policy";
 
 const maxUserStarBalance = 999_999_999;
+const authAttemptRetentionMs = 24 * 60 * 60 * 1000;
+const loginIdentifierWindowMs = 15 * 60 * 1000;
+const loginIpWindowMs = 15 * 60 * 1000;
+const loginIdentifierFailureLimit = 5;
+const loginIpFailureLimit = 30;
+const passwordResetFailureLimit = 6;
+const messageSecurityMetadataMaxLength = 240;
 const fallbackDeveloperEmails = ["rafaeltanki1212@gmail.com", "izigamer47@gmail.com"];
 const fallbackDeveloperUsernames = ["armadura_prime"];
 
@@ -78,6 +85,17 @@ interface TwoFactorSetupResponsePayload {
   otpauthUrl: string;
 }
 
+interface SessionView {
+  id: string;
+  current: boolean;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
 interface UpdateProfilePayload {
   username?: string;
   currentPassword?: string;
@@ -128,30 +146,41 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, metadata: ClientMetadata): Promise<AuthResponsePayload> {
+    const identifier = dto.emailOrUsername.trim().toLowerCase();
+    await this.enforceAuthAttemptLimit("login", identifier, metadata, loginIdentifierFailureLimit, loginIdentifierWindowMs, loginIpFailureLimit, loginIpWindowMs);
+
     const user = await this.users.findByEmailOrUsername(dto.emailOrUsername);
     if (!user || user.status !== "ACTIVE") {
+      await this.recordAuthAttempt("login", identifier, metadata, false, "invalid_credentials", user?.id);
       throw new UnauthorizedException("Invalid credentials.");
     }
 
     const passwordMatches = await this.verifyPasswordHash(user.passwordHash, dto.password);
     if (!passwordMatches) {
+      await this.recordAuthAttempt("login", identifier, metadata, false, "invalid_credentials", user.id);
       throw new UnauthorizedException("Invalid credentials.");
     }
 
     if (!user.emailVerifiedAt) {
+      await this.recordAuthAttempt("login", identifier, metadata, false, "email_not_verified", user.id);
       throw new UnauthorizedException("Ative sua conta pelo e-mail antes de entrar.");
     }
 
     if (user.twoFactorEnabled) {
       if (!user.twoFactorSecret || !dto.twoFactorCode) {
+        await this.recordAuthAttempt("login", identifier, metadata, false, "two_factor_required", user.id);
         throw new UnauthorizedException("Digite o codigo do autenticador para entrar.");
       }
 
-      if (!this.verifyTotpCode(user.twoFactorSecret, dto.twoFactorCode)) {
+      const twoFactorSecret = this.unprotectTwoFactorSecret(user.twoFactorSecret);
+      if (!twoFactorSecret || !this.verifyTotpCode(twoFactorSecret, dto.twoFactorCode)) {
+        await this.recordAuthAttempt("login", identifier, metadata, false, "two_factor_invalid", user.id);
         throw new UnauthorizedException("Codigo do autenticador invalido.");
       }
     }
 
+    await this.recordAuthAttempt("login", identifier, metadata, true, "success", user.id);
+    await this.recordSecurityEvent("login_success", user.id, user.id, metadata);
     return this.createAuthResponse(user.id, metadata);
   }
 
@@ -248,7 +277,7 @@ export class AuthService {
     return presentAuthUser(user);
   }
 
-  async addDeveloperStars(userId: string, amountInput: number) {
+  async addDeveloperStars(userId: string, amountInput: number, metadata: ClientMetadata = {}) {
     const currentUser = await this.users.findById(userId);
     if (!currentUser) {
       throw new UnauthorizedException("User not found.");
@@ -258,6 +287,8 @@ export class AuthService {
       throw new ForbiddenException("Somente conta developer pode adicionar saldo de estrelas.");
     }
 
+    this.assertHighPrivilegeTwoFactor(currentUser);
+
     const amount = Math.min(Math.max(Math.floor(amountInput) || 0, 1), maxUserStarBalance);
     const nextBalance = Math.min(maxUserStarBalance, currentUser.starBalance + amount);
     const user = await this.prisma.user.update({
@@ -265,10 +296,11 @@ export class AuthService {
       data: { starBalance: nextBalance }
     });
 
+    await this.recordSecurityEvent("developer_stars_added", userId, userId, metadata, { amount, nextBalance });
     return { user: presentAuthUser(user) };
   }
 
-  async changeEmail(userId: string, dto: ChangeEmailDto) {
+  async changeEmail(userId: string, currentSessionId: string, dto: ChangeEmailDto, metadata: ClientMetadata) {
     const currentUser = await this.users.findById(userId);
     if (!currentUser) {
       throw new UnauthorizedException("User not found.");
@@ -290,15 +322,22 @@ export class AuthService {
       throw new ConflictException("Email is already registered.");
     }
 
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: { email: dto.email }
-    });
+    const [user] = await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { email: dto.email }
+      }),
+      this.prisma.session.updateMany({
+        where: { userId, id: { not: currentSessionId }, revokedAt: null },
+        data: { revokedAt: new Date() }
+      })
+    ]);
 
+    await this.recordSecurityEvent("account_email_changed", userId, userId, metadata);
     return presentAuthUser(user);
   }
 
-  async changePassword(userId: string, currentSessionId: string, dto: ChangePasswordDto): Promise<{ ok: true }> {
+  async changePassword(userId: string, currentSessionId: string, dto: ChangePasswordDto, metadata: ClientMetadata): Promise<{ ok: true }> {
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException("Password confirmation does not match.");
     }
@@ -330,6 +369,7 @@ export class AuthService {
       })
     ]);
 
+    await this.recordSecurityEvent("account_password_changed", userId, userId, metadata);
     return { ok: true };
   }
 
@@ -354,9 +394,13 @@ export class AuthService {
     return { ok: true };
   }
 
-  async requestPasswordReset(dto: RequestPasswordResetDto): Promise<PasswordResetRequestResponsePayload> {
+  async requestPasswordReset(dto: RequestPasswordResetDto, metadata: ClientMetadata = {}): Promise<PasswordResetRequestResponsePayload> {
+    const identifier = dto.emailOrUsername.trim().toLowerCase();
+    await this.enforceAuthAttemptLimit("password_reset", identifier, metadata, passwordResetFailureLimit, 15 * 60 * 1000, 20, 15 * 60 * 1000);
+
     const user = await this.users.findByEmailOrUsername(dto.emailOrUsername);
     if (!user || user.status !== "ACTIVE") {
+      await this.recordAuthAttempt("password_reset", identifier, metadata, true, "accepted");
       return {
         ok: true,
         passwordResetEmailSent: true
@@ -385,6 +429,8 @@ export class AuthService {
       expiresAt
     });
 
+    await this.recordAuthAttempt("password_reset", identifier, metadata, true, "accepted", user.id);
+    await this.recordSecurityEvent("password_reset_requested", user.id, user.id, metadata);
     return {
       ok: true,
       passwordResetEmailSent,
@@ -392,9 +438,13 @@ export class AuthService {
     };
   }
 
-  async verifyPasswordResetCode(dto: VerifyPasswordResetCodeDto): Promise<PasswordResetVerifyResponsePayload> {
+  async verifyPasswordResetCode(dto: VerifyPasswordResetCodeDto, metadata: ClientMetadata = {}): Promise<PasswordResetVerifyResponsePayload> {
+    const identifier = dto.emailOrUsername.trim().toLowerCase();
+    await this.enforceAuthAttemptLimit("password_reset_verify", identifier, metadata, passwordResetFailureLimit, 15 * 60 * 1000, 20, 15 * 60 * 1000);
+
     const user = await this.users.findByEmailOrUsername(dto.emailOrUsername);
     if (!user || user.status !== "ACTIVE") {
+      await this.recordAuthAttempt("password_reset_verify", identifier, metadata, false, "invalid_code");
       throw new BadRequestException("Codigo invalido ou expirado.");
     }
 
@@ -404,6 +454,7 @@ export class AuthService {
     });
 
     if (!resetRecord || resetRecord.userId !== user.id || resetRecord.usedAt || resetRecord.expiresAt <= new Date()) {
+      await this.recordAuthAttempt("password_reset_verify", identifier, metadata, false, "invalid_code", user.id);
       throw new BadRequestException("Codigo invalido ou expirado.");
     }
 
@@ -416,13 +467,15 @@ export class AuthService {
       }
     });
 
+    await this.recordAuthAttempt("password_reset_verify", identifier, metadata, true, "success", user.id);
+    await this.recordSecurityEvent("password_reset_code_verified", user.id, user.id, metadata);
     return {
       ok: true,
       resetToken
     };
   }
 
-  async confirmPasswordReset(dto: ConfirmPasswordResetDto): Promise<{ ok: true }> {
+  async confirmPasswordReset(dto: ConfirmPasswordResetDto, metadata: ClientMetadata = {}): Promise<{ ok: true }> {
     if (dto.newPassword !== dto.confirmPassword) {
       throw new BadRequestException("Password confirmation does not match.");
     }
@@ -456,10 +509,11 @@ export class AuthService {
       })
     ]);
 
+    await this.recordSecurityEvent("password_reset_completed", resetRecord.userId, resetRecord.userId, metadata);
     return { ok: true };
   }
 
-  async setupTwoFactor(userId: string, dto: SetupTwoFactorDto): Promise<TwoFactorSetupResponsePayload> {
+  async setupTwoFactor(userId: string, dto: SetupTwoFactorDto, metadata: ClientMetadata = {}): Promise<TwoFactorSetupResponsePayload> {
     const currentUser = await this.users.findById(userId);
     if (!currentUser) {
       throw new UnauthorizedException("User not found.");
@@ -474,11 +528,12 @@ export class AuthService {
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        twoFactorSecret: secret,
+        twoFactorSecret: this.protectTwoFactorSecret(secret),
         twoFactorEnabled: false
       }
     });
 
+    await this.recordSecurityEvent("two_factor_setup_started", userId, userId, metadata);
     return {
       ok: true,
       secret,
@@ -486,25 +541,33 @@ export class AuthService {
     };
   }
 
-  async enableTwoFactor(userId: string, dto: EnableTwoFactorDto) {
+  async enableTwoFactor(userId: string, currentSessionId: string, dto: EnableTwoFactorDto, metadata: ClientMetadata) {
     const currentUser = await this.users.findById(userId);
     if (!currentUser) {
       throw new UnauthorizedException("User not found.");
     }
 
-    if (!currentUser.twoFactorSecret || !this.verifyTotpCode(currentUser.twoFactorSecret, dto.code)) {
+    const twoFactorSecret = currentUser.twoFactorSecret ? this.unprotectTwoFactorSecret(currentUser.twoFactorSecret) : null;
+    if (!twoFactorSecret || !this.verifyTotpCode(twoFactorSecret, dto.code)) {
       throw new BadRequestException("Codigo do autenticador invalido.");
     }
 
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: { twoFactorEnabled: true }
-    });
+    const [user] = await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { twoFactorEnabled: true }
+      }),
+      this.prisma.session.updateMany({
+        where: { userId, id: { not: currentSessionId }, revokedAt: null },
+        data: { revokedAt: new Date() }
+      })
+    ]);
 
+    await this.recordSecurityEvent("two_factor_enabled", userId, userId, metadata);
     return presentAuthUser(user);
   }
 
-  async disableTwoFactor(userId: string, dto: DisableTwoFactorDto) {
+  async disableTwoFactor(userId: string, currentSessionId: string, dto: DisableTwoFactorDto, metadata: ClientMetadata) {
     const currentUser = await this.users.findById(userId);
     if (!currentUser) {
       throw new UnauthorizedException("User not found.");
@@ -515,18 +578,26 @@ export class AuthService {
       throw new UnauthorizedException("Senha atual incorreta.");
     }
 
-    if (currentUser.twoFactorEnabled && (!currentUser.twoFactorSecret || !dto.code || !this.verifyTotpCode(currentUser.twoFactorSecret, dto.code))) {
+    const twoFactorSecret = currentUser.twoFactorSecret ? this.unprotectTwoFactorSecret(currentUser.twoFactorSecret) : null;
+    if (currentUser.twoFactorEnabled && (!twoFactorSecret || !dto.code || !this.verifyTotpCode(twoFactorSecret, dto.code))) {
       throw new BadRequestException("Codigo do autenticador invalido.");
     }
 
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        twoFactorEnabled: false,
-        twoFactorSecret: null
-      }
-    });
+    const [user] = await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          twoFactorEnabled: false,
+          twoFactorSecret: null
+        }
+      }),
+      this.prisma.session.updateMany({
+        where: { userId, id: { not: currentSessionId }, revokedAt: null },
+        data: { revokedAt: new Date() }
+      })
+    ]);
 
+    await this.recordSecurityEvent("two_factor_disabled", userId, userId, metadata);
     return presentAuthUser(user);
   }
 
@@ -585,6 +656,12 @@ export class AuthService {
       || [...configuredUsernames, ...fallbackDeveloperUsernames].map((item) => item.toLowerCase()).includes(username);
   }
 
+  private assertHighPrivilegeTwoFactor(user: Pick<User, "twoFactorEnabled">) {
+    if (!user.twoFactorEnabled) {
+      throw new ForbiddenException("Ative a autenticacao em dois fatores antes de usar acoes developer.");
+    }
+  }
+
   private readConfiguredList(key: string) {
     const value = this.config.get<string>(key);
     return String(value ?? "")
@@ -593,7 +670,63 @@ export class AuthService {
       .filter(Boolean);
   }
 
-  async logout(userId: string, sessionId: string): Promise<{ ok: true }> {
+  async listSessions(userId: string, currentSessionId: string): Promise<{ sessions: SessionView[] }> {
+    const sessions = await this.prisma.session.findMany({
+      where: { userId },
+      orderBy: { lastSeenAt: "desc" },
+      take: 50
+    });
+
+    return {
+      sessions: sessions.map((session) => ({
+        id: session.id,
+        current: session.id === currentSessionId,
+        ipAddress: session.ipAddress,
+        userAgent: session.userAgent,
+        createdAt: session.createdAt.toISOString(),
+        lastSeenAt: session.lastSeenAt?.toISOString() ?? null,
+        expiresAt: session.expiresAt.toISOString(),
+        revokedAt: session.revokedAt?.toISOString() ?? null
+      }))
+    };
+  }
+
+  async revokeSession(userId: string, currentSessionId: string, targetSessionId: string, metadata: ClientMetadata): Promise<{ ok: true; revokedSessionId: string }> {
+    const cleanSessionId = targetSessionId.trim();
+    if (!cleanSessionId) {
+      throw new BadRequestException("Sessao obrigatoria.");
+    }
+
+    const result = await this.prisma.session.updateMany({
+      where: { id: cleanSessionId, userId, revokedAt: null },
+      data: { revokedAt: new Date() }
+    });
+
+    if (!result.count) {
+      throw new NotFoundException("Sessao nao encontrada ou ja encerrada.");
+    }
+
+    await this.recordSecurityEvent(
+      cleanSessionId === currentSessionId ? "session_revoked_current" : "session_revoked",
+      userId,
+      userId,
+      metadata,
+      { sessionId: cleanSessionId }
+    );
+    return { ok: true, revokedSessionId: cleanSessionId };
+  }
+
+  async revokeOtherSessions(userId: string, currentSessionId: string, metadata: ClientMetadata): Promise<{ ok: true; revoked: number }> {
+    const result = await this.prisma.session.updateMany({
+      where: { userId, id: { not: currentSessionId }, revokedAt: null },
+      data: { revokedAt: new Date() }
+    });
+
+    await this.recordSecurityEvent("sessions_revoked_others", userId, userId, metadata, { revoked: result.count });
+    return { ok: true, revoked: result.count };
+  }
+
+  async logout(userId: string, sessionId: string, metadata: ClientMetadata): Promise<{ ok: true }> {
     const now = new Date();
     await this.prisma.session.updateMany({
       where: { id: sessionId, revokedAt: null },
@@ -616,7 +749,159 @@ export class AuthService {
       });
     }
 
+    await this.recordSecurityEvent("logout", userId, userId, metadata, { sessionId });
     return { ok: true };
+  }
+
+  private async enforceAuthAttemptLimit(
+    scope: string,
+    identifier: string,
+    metadata: ClientMetadata,
+    identifierLimit: number,
+    identifierWindowMs: number,
+    ipLimit = identifierLimit * 4,
+    ipWindowMs = identifierWindowMs
+  ) {
+    const now = Date.now();
+    const identifierHash = this.hashSecurityIdentifier(identifier);
+    const ipHash = metadata.ipAddress ? this.hashSecurityIdentifier(`ip:${metadata.ipAddress}`) : null;
+
+    await this.pruneAuthAttempts();
+    const [identifierFailures, latestIdentifierFailure, ipFailures, latestIpFailure] = await Promise.all([
+      this.prisma.authAttempt.count({
+        where: {
+          scope,
+          identifierHash,
+          success: false,
+          createdAt: { gte: new Date(now - identifierWindowMs) }
+        }
+      }),
+      this.prisma.authAttempt.findFirst({
+        where: {
+          scope,
+          identifierHash,
+          success: false,
+          createdAt: { gte: new Date(now - identifierWindowMs) }
+        },
+        orderBy: { createdAt: "desc" }
+      }),
+      ipHash
+        ? this.prisma.authAttempt.count({
+            where: {
+              scope,
+              ipHash,
+              success: false,
+              createdAt: { gte: new Date(now - ipWindowMs) }
+            }
+          })
+        : Promise.resolve(0),
+      ipHash
+        ? this.prisma.authAttempt.findFirst({
+            where: {
+              scope,
+              ipHash,
+              success: false,
+              createdAt: { gte: new Date(now - ipWindowMs) }
+            },
+            orderBy: { createdAt: "desc" }
+          })
+        : Promise.resolve(null)
+    ]);
+
+    const identifierRetryAt = this.getRetryAt(latestIdentifierFailure?.createdAt ?? null, identifierFailures, identifierLimit);
+    const ipRetryAt = this.getRetryAt(latestIpFailure?.createdAt ?? null, ipFailures, ipLimit);
+    const retryAt = Math.max(identifierRetryAt, ipRetryAt);
+    if (retryAt > now) {
+      const seconds = Math.max(30, Math.ceil((retryAt - now) / 1000));
+      throw new UnauthorizedException(`Muitas tentativas. Aguarde ${Math.ceil(seconds / 60)} minuto(s) antes de tentar novamente.`);
+    }
+  }
+
+  private getRetryAt(latestFailureAt: Date | null, failureCount: number, limit: number) {
+    if (!latestFailureAt || failureCount < limit) {
+      return 0;
+    }
+
+    const overLimit = Math.max(0, failureCount - limit);
+    const lockoutMs = Math.min(60 * 60 * 1000, 5 * 60 * 1000 * 2 ** Math.min(overLimit, 4));
+    return latestFailureAt.getTime() + lockoutMs;
+  }
+
+  private async pruneAuthAttempts() {
+    await this.prisma.authAttempt.deleteMany({
+      where: {
+        createdAt: { lt: new Date(Date.now() - authAttemptRetentionMs) }
+      }
+    });
+  }
+
+  private async recordAuthAttempt(
+    scope: string,
+    identifier: string,
+    metadata: ClientMetadata,
+    success: boolean,
+    reason: string,
+    userId?: string
+  ) {
+    const safeMetadata = this.cleanClientMetadata(metadata);
+    await this.prisma.authAttempt.create({
+      data: {
+        scope: scope.slice(0, 40),
+        identifierHash: this.hashSecurityIdentifier(identifier),
+        ipHash: safeMetadata.ipAddress ? this.hashSecurityIdentifier(`ip:${safeMetadata.ipAddress}`) : null,
+        userId,
+        success,
+        reason: reason.slice(0, 80)
+      }
+    });
+
+    if (!success) {
+      await this.recordSecurityEvent(`${scope}_failed`, userId ?? null, userId ?? null, safeMetadata, { reason });
+    }
+  }
+
+  private async recordSecurityEvent(
+    action: string,
+    actorId: string | null,
+    targetId: string | null,
+    metadata: ClientMetadata,
+    eventMetadata?: Record<string, unknown>
+  ) {
+    const safeMetadata = this.cleanClientMetadata(metadata);
+    await this.prisma.securityEvent.create({
+      data: {
+        action: action.slice(0, 80),
+        actorId,
+        targetId,
+        ipAddress: safeMetadata.ipAddress,
+        userAgent: safeMetadata.userAgent,
+        metadata: eventMetadata ? this.toInputJson(this.sanitizeSecurityMetadata(eventMetadata)) : undefined
+      }
+    });
+  }
+
+  private sanitizeSecurityMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(metadata).map(([key, value]) => [
+        key.slice(0, 80),
+        typeof value === "string" ? value.slice(0, messageSecurityMetadataMaxLength) : typeof value === "number" || typeof value === "boolean" ? value : null
+      ])
+    );
+  }
+
+  private cleanClientMetadata(metadata: ClientMetadata): ClientMetadata {
+    return {
+      ipAddress: metadata.ipAddress?.slice(0, 80),
+      userAgent: metadata.userAgent?.slice(0, 240)
+    };
+  }
+
+  private hashSecurityIdentifier(value: string): string {
+    return createHmac("sha256", this.getSecurityHashSecret()).update(value.trim().toLowerCase()).digest("hex");
+  }
+
+  private getSecurityHashSecret(): string {
+    return this.config.get<string>("SECURITY_EVENT_HASH_SECRET")?.trim() || this.config.get<string>("JWT_SECRET")?.trim() || "tempest-light-dev-secret";
   }
 
   private async verifyPasswordHash(passwordHash: string, password: string): Promise<boolean> {
@@ -740,6 +1025,40 @@ export class AuthService {
     return new Date(now + value * multiplier);
   }
 
+  private protectTwoFactorSecret(secret: string): string {
+    const key = this.getEncryptionKey();
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `enc:v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${encrypted.toString("base64url")}`;
+  }
+
+  private unprotectTwoFactorSecret(value: string): string | null {
+    if (!value.startsWith("enc:v1:")) {
+      return value;
+    }
+
+    const [, , ivText, tagText, encryptedText] = value.split(":");
+    if (!ivText || !tagText || !encryptedText) {
+      return null;
+    }
+
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", this.getEncryptionKey(), Buffer.from(ivText, "base64url"));
+      decipher.setAuthTag(Buffer.from(tagText, "base64url"));
+      return Buffer.concat([decipher.update(Buffer.from(encryptedText, "base64url")), decipher.final()]).toString("utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  private getEncryptionKey(): Buffer {
+    const configured = this.config.get<string>("TWO_FACTOR_SECRET_ENCRYPTION_KEY")?.trim();
+    const fallback = this.config.get<string>("JWT_SECRET")?.trim();
+    return createHash("sha256").update(configured || fallback || "tempest-light-dev-secret").digest();
+  }
+
   private createTwoFactorSecret(): string {
     return this.base32Encode(randomBytes(20));
   }
@@ -854,5 +1173,9 @@ export class AuthService {
 
   private hashToken(token: string): string {
     return createHash("sha256").update(token).digest("hex");
+  }
+
+  private toInputJson(value: Record<string, unknown>) {
+    return value as Prisma.InputJsonValue;
   }
 }

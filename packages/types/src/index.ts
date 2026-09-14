@@ -37,6 +37,31 @@ export interface AuthResponse {
   user: AuthUser;
 }
 
+export interface AuthSession {
+  id: string;
+  current: boolean;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
+export interface AuthSessionsResponse {
+  sessions: AuthSession[];
+}
+
+export interface RevokeAuthSessionResponse {
+  ok: true;
+  revokedSessionId: string;
+}
+
+export interface RevokeOtherAuthSessionsResponse {
+  ok: true;
+  revoked: number;
+}
+
 export interface RegisterResponse {
   ok: true;
   email: string;

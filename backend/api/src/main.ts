@@ -19,8 +19,8 @@ async function bootstrap() {
 
   app.setGlobalPrefix("api/v1");
   app.enableShutdownHooks();
-  app.useBodyParser("json", { limit: "75mb" });
-  app.useBodyParser("urlencoded", { extended: true, limit: "75mb" });
+  app.useBodyParser("json", { limit: config.get<string>("JSON_BODY_LIMIT") ?? "16mb" });
+  app.useBodyParser("urlencoded", { extended: true, limit: config.get<string>("FORM_BODY_LIMIT") ?? "1mb" });
   app.use(helmet());
   app.use(compression());
   app.enableCors({

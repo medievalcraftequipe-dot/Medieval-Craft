@@ -13,6 +13,7 @@ export interface AuthenticatedPrincipal {
   emailVerifiedAt: string | null;
   blockNonFriendDirectMessages: boolean;
   starBalance: number;
+  twoFactorEnabled: boolean;
   createdAt: string;
   sessionId: string;
 }

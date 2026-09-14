@@ -12,6 +12,11 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+if (Buffer.byteLength(process.env.JWT_SECRET, "utf8") < 32) {
+  console.error("JWT_SECRET precisa ter pelo menos 32 caracteres para iniciar a API com seguranca.");
+  process.exit(1);
+}
+
 const prismaCli = require.resolve("prisma/build/index.js");
 
 function runPrisma(args) {
@@ -44,6 +49,10 @@ async function boot() {
     try {
       await ensureEmergencyColumns();
       runPrisma(["migrate", "resolve", "--applied", "20260909200500_user_star_balance"]);
+      const retryMigrate = runPrisma(["migrate", "deploy"]);
+      if (retryMigrate.status !== 0) {
+        process.exit(retryMigrate.status ?? 1);
+      }
     } catch (caught) {
       console.error("Nao foi possivel preparar o banco para iniciar a API.");
       console.error(caught);
