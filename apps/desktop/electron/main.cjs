@@ -10,6 +10,14 @@ const { app, BrowserWindow, desktopCapturer, ipcMain, session, shell } = require
 const runtimeConfig = readRuntimeConfig();
 const isDev = !app.isPackaged;
 const protocolScheme = "tempest-light";
+const updateManifestMaxBytes = 128 * 1024;
+const updatePackageMaxBytes = 105 * 1024 * 1024;
+const updateInstallerMaxBytes = 512 * 1024 * 1024;
+const updateTrustedDownloadHosts = new Set([
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com"
+]);
 
 let mainWindow = null;
 let latestManifest = null;
@@ -813,26 +821,37 @@ async function fetchUpdateManifest() {
   }
 
   const manifestUrl = new URL(runtimeConfig.updateFeedUrl);
+  const releaseContext = assertTrustedUpdateManifestUrl(manifestUrl);
   writeUpdateLog("Downloading update manifest.", { manifestUrl: manifestUrl.toString() });
-  const body = await downloadBuffer(manifestUrl);
+  const body = await downloadBuffer(manifestUrl, null, 0, {}, {
+    maxBytes: updateManifestMaxBytes,
+    validateUrl: (downloadUrl) => assertTrustedUpdateDownloadUrl(downloadUrl, "manifest de atualizacao")
+  });
   const manifest = JSON.parse(body.toString("utf8"));
 
   if (!manifest || typeof manifest.version !== "string" || typeof manifest.setupUrl !== "string") {
     throw new Error("Manifest invalido. Campos exigidos: version e setupUrl.");
   }
 
+  const version = normalizeUpdateVersion(manifest.version);
+  const setupUrl = new URL(manifest.setupUrl, manifestUrl);
+  assertTrustedUpdateAssetUrl(setupUrl, releaseContext, "pacote principal de atualizacao");
+  const packageSha256 = normalizeSha256(manifest.sha256, "SHA-256 do pacote principal de atualizacao");
+
   writeUpdateLog("Update manifest validated.", {
-    version: manifest.version,
-    setupUrl: manifest.setupUrl,
-    hasSha256: typeof manifest.sha256 === "string"
+    version,
+    setupUrl: setupUrl.toString(),
+    sha256: packageSha256,
+    repository: `${releaseContext.owner}/${releaseContext.repo}`
   });
 
   return {
-    version: manifest.version,
-    setupUrl: new URL(manifest.setupUrl, manifestUrl).toString(),
-    sha256: typeof manifest.sha256 === "string" ? manifest.sha256 : null,
+    version,
+    setupUrl: setupUrl.toString(),
+    sha256: packageSha256,
     publishedAt: typeof manifest.publishedAt === "string" ? manifest.publishedAt : null,
-    changelog: typeof manifest.changelog === "string" ? manifest.changelog : null
+    changelog: typeof manifest.changelog === "string" ? manifest.changelog : null,
+    releaseContext
   };
 }
 
@@ -849,23 +868,31 @@ async function downloadJsonInstaller(manifest) {
       transferred: progress.transferred,
       total: progress.total
     });
+  }, 0, {}, {
+    maxBytes: updatePackageMaxBytes,
+    validateUrl: (downloadUrl) => assertTrustedUpdateDownloadUrl(downloadUrl, "pacote principal de atualizacao")
   });
   writeUpdateLog("Main update package downloaded.", {
     targetVersion: manifest.version,
     bytes: packageBuffer.length
   });
 
-  if (manifest.sha256) {
-    const packageSha256 = assertSha256(packageBuffer, manifest.sha256, "Assinatura SHA-256 diferente do manifest.");
-    writeUpdateLog("Main update package SHA-256 validated.", { sha256: packageSha256 });
-  }
+  const packageSha256 = assertSha256(packageBuffer, manifest.sha256, "Assinatura SHA-256 diferente do manifest.");
+  writeUpdateLog("Main update package SHA-256 validated.", { sha256: packageSha256 });
 
   sendUpdateProgress({ percent: 65, transferred: 1, total: 1 });
 
   const updatePackage = JSON.parse(packageBuffer.toString("utf8"));
-  if (!updatePackage || typeof updatePackage.base64 !== "string") {
+  if (!updatePackage || updatePackage.format !== "tempest-light-installer-package-v2" || typeof updatePackage.base64 !== "string") {
     throw new Error("Pacote JSON de atualizacao invalido.");
   }
+
+  const installerSha256Expected = normalizeSha256(updatePackage.sha256, "SHA-256 do instalador");
+  const expectedInstallerSize = normalizePositiveInteger(updatePackage.size, "tamanho do instalador");
+  if (expectedInstallerSize > updateInstallerMaxBytes) {
+    throw new Error("Instalador de atualizacao passou do limite seguro.");
+  }
+  assertBase64Chunk(updatePackage.base64, "pacote principal de atualizacao");
 
   const base64Parts = [updatePackage.base64];
   const chunks = Array.isArray(updatePackage.chunks) ? updatePackage.chunks : [];
@@ -882,6 +909,8 @@ async function downloadJsonInstaller(manifest) {
     }
 
     const chunkUrl = new URL(chunkReference, manifest.setupUrl);
+    assertTrustedUpdateAssetUrl(chunkUrl, manifest.releaseContext, `parte ${index + 2} do pacote de atualizacao`);
+    const chunkSha256Expected = normalizeSha256(chunk.sha256, `SHA-256 da parte ${index + 2} do pacote de atualizacao`);
     const chunkStart = 60 + (index / Math.max(chunks.length, 1)) * 25;
     const chunkEnd = 60 + ((index + 1) / Math.max(chunks.length, 1)) * 25;
     writeUpdateLog("Downloading update package chunk.", {
@@ -896,6 +925,9 @@ async function downloadJsonInstaller(manifest) {
         transferred: progress.transferred,
         total: progress.total
       });
+    }, 0, {}, {
+      maxBytes: updatePackageMaxBytes,
+      validateUrl: (downloadUrl) => assertTrustedUpdateDownloadUrl(downloadUrl, `parte ${index + 2} do pacote de atualizacao`)
     });
     writeUpdateLog("Update package chunk downloaded.", {
       targetVersion: manifest.version,
@@ -903,31 +935,34 @@ async function downloadJsonInstaller(manifest) {
       bytes: chunkBuffer.length
     });
 
-    if (chunk.sha256) {
-      const chunkSha256 = assertSha256(chunkBuffer, chunk.sha256, `Assinatura SHA-256 da parte ${index + 2} diferente do pacote JSON.`);
-      writeUpdateLog("Update package chunk SHA-256 validated.", {
-        part: index + 2,
-        sha256: chunkSha256
-      });
-    }
+    const chunkSha256 = assertSha256(chunkBuffer, chunkSha256Expected, `Assinatura SHA-256 da parte ${index + 2} diferente do pacote JSON.`);
+    writeUpdateLog("Update package chunk SHA-256 validated.", {
+      part: index + 2,
+      sha256: chunkSha256
+    });
 
     const chunkPackage = JSON.parse(chunkBuffer.toString("utf8"));
-    if (!chunkPackage || typeof chunkPackage.base64 !== "string") {
+    if (!chunkPackage || chunkPackage.format !== "tempest-light-installer-chunk-v1" || typeof chunkPackage.base64 !== "string") {
       throw new Error(`Parte ${index + 2} do pacote JSON de atualizacao invalida.`);
     }
+    assertBase64Chunk(chunkPackage.base64, `parte ${index + 2} do pacote de atualizacao`);
 
     base64Parts.push(chunkPackage.base64);
   }
 
   const installerBuffer = Buffer.concat(base64Parts.map((part) => Buffer.from(part, "base64")));
-  if (updatePackage.sha256) {
-    const installerSha256 = assertSha256(installerBuffer, updatePackage.sha256, "Assinatura SHA-256 do instalador diferente do pacote JSON.");
-    writeUpdateLog("Rebuilt installer SHA-256 validated.", {
-      targetVersion: manifest.version,
-      sha256: installerSha256,
-      bytes: installerBuffer.length
-    });
+  if (installerBuffer.length !== expectedInstallerSize) {
+    throw new Error("Tamanho do instalador reconstruido nao confere com o pacote JSON.");
   }
+  if (installerBuffer.subarray(0, 2).toString("ascii") !== "MZ") {
+    throw new Error("Instalador reconstruido nao parece ser um executavel Windows valido.");
+  }
+  const installerSha256 = assertSha256(installerBuffer, installerSha256Expected, "Assinatura SHA-256 do instalador diferente do pacote JSON.");
+  writeUpdateLog("Rebuilt installer SHA-256 validated.", {
+    targetVersion: manifest.version,
+    sha256: installerSha256,
+    bytes: installerBuffer.length
+  });
 
   const fileName = safeInstallerName(updatePackage.fileName || `Tempest Light Setup ${manifest.version}.exe`);
   const targetDir = getInstallerDownloadDir();
@@ -946,8 +981,12 @@ async function downloadJsonInstaller(manifest) {
   return targetPath;
 }
 
-function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}) {
+function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}, options = {}) {
   return new Promise((resolve, reject) => {
+    if (options.validateUrl) {
+      options.validateUrl(url);
+    }
+
     const client = url.protocol === "http:" ? http : https;
     const request = client.get(
       url,
@@ -967,7 +1006,7 @@ function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}) {
             reject(new Error("Redirecionamentos demais ao baixar atualizacao."));
             return;
           }
-          resolve(downloadBuffer(new URL(response.headers.location, url), onProgress, redirectCount + 1));
+          resolve(downloadBuffer(new URL(response.headers.location, url), onProgress, redirectCount + 1, extraHeaders, options));
           return;
         }
 
@@ -978,12 +1017,29 @@ function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}) {
         }
 
         const total = Number(response.headers["content-length"] ?? 0);
+        if (options.maxBytes && total > options.maxBytes) {
+          response.resume();
+          reject(new Error("Arquivo remoto passou do limite seguro de download."));
+          return;
+        }
+
         let transferred = 0;
         const chunks = [];
+        let rejected = false;
 
         response.on("data", (chunk) => {
+          if (rejected) {
+            return;
+          }
+
           chunks.push(chunk);
           transferred += chunk.length;
+          if (options.maxBytes && transferred > options.maxBytes) {
+            rejected = true;
+            response.destroy();
+            reject(new Error("Arquivo remoto passou do limite seguro de download."));
+            return;
+          }
 
           if (onProgress) {
             onProgress({
@@ -994,7 +1050,17 @@ function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}) {
           }
         });
 
-        response.on("end", () => resolve(Buffer.concat(chunks)));
+        response.on("end", () => {
+          if (!rejected) {
+            resolve(Buffer.concat(chunks));
+          }
+        });
+        response.on("error", (error) => {
+          if (!rejected) {
+            rejected = true;
+            reject(error);
+          }
+        });
       }
     );
 
@@ -1003,6 +1069,112 @@ function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}) {
     });
     request.on("error", reject);
   });
+}
+
+function assertTrustedUpdateManifestUrl(url) {
+  assertHttpsUrl(url, "manifest de atualizacao");
+  const parts = getGitHubReleasePathParts(url);
+  if (!parts) {
+    throw new Error("Manifest de atualizacao precisa vir de uma Release do GitHub configurado.");
+  }
+
+  return {
+    owner: parts.owner,
+    repo: parts.repo
+  };
+}
+
+function assertTrustedUpdateAssetUrl(url, releaseContext, label) {
+  assertHttpsUrl(url, label);
+  const parts = getGitHubReleasePathParts(url);
+  if (!parts || parts.owner !== releaseContext.owner || parts.repo !== releaseContext.repo) {
+    throw new Error(`${label} precisa vir da mesma Release GitHub configurada.`);
+  }
+
+  if (!/\.json$/i.test(parts.fileName)) {
+    throw new Error(`${label} precisa ser um arquivo JSON de update.`);
+  }
+}
+
+function assertTrustedUpdateDownloadUrl(url, label) {
+  assertHttpsUrl(url, label);
+  const host = url.hostname.toLowerCase();
+  if (updateTrustedDownloadHosts.has(host) || host.endsWith(".githubusercontent.com")) {
+    return;
+  }
+
+  throw new Error(`${label} apontou para uma origem nao confiavel.`);
+}
+
+function assertHttpsUrl(url, label) {
+  if (url.protocol !== "https:") {
+    throw new Error(`${label} precisa usar HTTPS.`);
+  }
+}
+
+function getGitHubReleasePathParts(url) {
+  if (url.hostname.toLowerCase() !== "github.com") {
+    return null;
+  }
+
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length < 5 || parts[2] !== "releases") {
+    return null;
+  }
+
+  const owner = sanitizeGitHubPathPart(parts[0]);
+  const repo = sanitizeGitHubPathPart(parts[1]);
+  if (!owner || !repo) {
+    return null;
+  }
+
+  if (parts[3] === "latest" && parts[4] === "download" && parts[5]) {
+    return { owner, repo, fileName: parts[5] };
+  }
+
+  if (parts[3] === "download" && parts[4] && parts[5]) {
+    return { owner, repo, fileName: parts[5] };
+  }
+
+  return null;
+}
+
+function sanitizeGitHubPathPart(value) {
+  const clean = String(value ?? "").trim().toLowerCase();
+  return /^[a-z0-9_.-]{1,100}$/i.test(clean) && !clean.includes("..") ? clean : null;
+}
+
+function normalizeUpdateVersion(value) {
+  const version = String(value ?? "").trim();
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error("Versao de atualizacao invalida.");
+  }
+
+  return version;
+}
+
+function normalizeSha256(value, label) {
+  const sha256 = String(value ?? "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new Error(`${label} ausente ou invalido.`);
+  }
+
+  return sha256;
+}
+
+function normalizePositiveInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`${label} ausente ou invalido.`);
+  }
+
+  return number;
+}
+
+function assertBase64Chunk(value, label) {
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/=]+$/.test(value)) {
+    throw new Error(`${label} possui base64 invalido.`);
+  }
 }
 
 function assertSha256(buffer, expected, message) {

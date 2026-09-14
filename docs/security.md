@@ -22,6 +22,7 @@ This project treats the API as the source of truth. The desktop/web client can i
 - Helmet HTTP hardening, compression, and CORS allowlist by environment.
 - Security event table for critical account actions.
 - Shard startup validates required secrets and retries Prisma migrations after known legacy schema repair.
+- Desktop updates require HTTPS GitHub Release assets, valid semantic version, package/chunk SHA-256, rebuilt installer SHA-256, expected installer size, and Windows executable header validation before running the installer.
 
 ## Required environment
 
@@ -41,3 +42,4 @@ This project treats the API as the source of truth. The desktop/web client can i
 - Full admin security event viewer.
 - Isolated sandbox/runtime for user-authored bot code. Do not execute arbitrary JavaScript, Python, Java, shell, or system commands from users in the API process.
 - Formal dependency scanning, CI secret scanning, backup restore drills, and incident response runbooks.
+- Code signing certificate for the Windows installer and executable.
