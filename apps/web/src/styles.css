@@ -7004,6 +7004,12 @@ img.profile-account-avatar {
   padding: 10px;
 }
 
+.bot-media-field.compact {
+  grid-template-columns: 72px minmax(0, auto) minmax(0, auto);
+  align-items: center;
+  padding: 8px;
+}
+
 .bot-media-preview {
   display: grid;
   min-height: 72px;
@@ -7072,6 +7078,64 @@ img.profile-account-avatar {
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface-strong), transparent 14%);
   padding: 10px;
+}
+
+.bot-command-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.bot-command-actions span,
+.bot-custom-command small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.bot-command-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-weight: 900;
+  padding: 0 10px;
+}
+
+.bot-custom-command-list,
+.bot-custom-command {
+  display: grid;
+  gap: 10px;
+}
+
+.bot-custom-command {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.bot-custom-command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bot-custom-command-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(150px, 0.7fr);
+  gap: 10px;
+}
+
+.bot-code-editor {
+  display: grid;
+  gap: 7px;
 }
 
 .bot-chip-grid {
@@ -7595,13 +7659,33 @@ img.profile-account-avatar {
 
 .bot-module-editor,
 .bot-channel-editor,
-.bot-saved-details {
+.bot-saved-details,
+.bot-saved-media-editor {
   grid-column: 1 / -1;
 }
 
+.bot-saved-media-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bot-presence-control {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
 .bot-inline-editor input,
+.bot-inline-editor select,
+.bot-inline-editor textarea,
 .bot-add-panel input,
-.bot-add-panel textarea {
+.bot-add-panel textarea,
+.bot-custom-command input,
+.bot-custom-command select,
+.bot-custom-command textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line);
@@ -7612,15 +7696,33 @@ img.profile-account-avatar {
   padding: 0 10px;
 }
 
-.bot-add-panel textarea {
+.bot-inline-editor select,
+.bot-custom-command select {
+  cursor: pointer;
+}
+
+.bot-add-panel textarea,
+.bot-custom-command textarea {
   min-height: 74px;
   padding: 10px;
   resize: vertical;
 }
 
+.bot-custom-command textarea {
+  min-height: 148px;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .bot-inline-editor input:focus,
+.bot-inline-editor select:focus,
+.bot-inline-editor textarea:focus,
 .bot-add-panel input:focus,
-.bot-add-panel textarea:focus {
+.bot-add-panel textarea:focus,
+.bot-custom-command input:focus,
+.bot-custom-command select:focus,
+.bot-custom-command textarea:focus {
   border-color: var(--accent);
 }
 

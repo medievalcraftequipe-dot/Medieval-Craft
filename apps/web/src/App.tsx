@@ -162,6 +162,8 @@ type RoleStyle = "solid" | "gradient" | "holographic";
 type DiscordBridgeStatus = "connected" | "pending" | "error";
 type BotCommandModule = "utility" | "music" | "moderation" | "fun" | "economy";
 type BotPlatform = "tempest" | "discord";
+type BotPresenceStatus = "ONLINE" | "IDLE" | "OFFLINE";
+type BotCommandLanguage = "actions" | "reply" | "javascript" | "python" | "java" | "other";
 type MessageMentionKind = "member" | "bot" | "role";
 type InAppUpdateState = "available" | "checking" | "installing" | "restarting" | "current" | "error";
 type InviteDurationId = "24h" | "2d" | "5d" | "30d" | "1m" | "never";
@@ -497,13 +499,23 @@ interface ServerBotIntegration {
   discordApplicationId: string | null;
   bridgeStatus: DiscordBridgeStatus;
   runtimeEnabled: boolean;
+  presence: BotPresenceStatus;
   prefix: string;
   commandName: string;
   replyText: string;
   commandChannelNames: string[];
   commandModules: BotCommandModule[];
+  customCommands: BotCustomCommand[];
   addedBy: string;
   addedAt: string;
+}
+
+interface BotCustomCommand {
+  id: string;
+  name: string;
+  language: BotCommandLanguage;
+  code: string;
+  enabled: boolean;
 }
 
 interface ServerAuditLog {
@@ -899,12 +911,27 @@ const starProgressPalettes = [
   { id: "amethyst", label: "Ametista", gradient: "linear-gradient(90deg, #8b5cf6, #ec4899, #f59e0b)" }
 ] as const;
 const defaultBotCommandModules: BotCommandModule[] = ["utility", "music", "moderation", "fun", "economy"];
+const maxBotCustomCommands = 25;
+const botCustomCommandCodeMaxLength = 8000;
 const botCommandModuleLabels: Record<BotCommandModule, string> = {
   utility: "Utilidades",
   music: "Musica",
   moderation: "Moderacao",
   fun: "Diversao",
   economy: "Economia"
+};
+const botPresenceOptions: Array<{ value: BotPresenceStatus; label: string; detail: string }> = [
+  { value: "ONLINE", label: "Online", detail: "responde aos comandos" },
+  { value: "IDLE", label: "Ausente", detail: "aparece ausente e continua respondendo" },
+  { value: "OFFLINE", label: "Offline", detail: "nao responde aos comandos" }
+];
+const botCommandLanguageLabels: Record<BotCommandLanguage, string> = {
+  actions: "Acoes do Tempest",
+  reply: "Resposta segura",
+  javascript: "JavaScript",
+  python: "Python",
+  java: "Java",
+  other: "Outra linguagem"
 };
 
 function getStarProgressGradient(paletteId?: string | null) {
@@ -2696,6 +2723,96 @@ function normalizeServerMember(member: Partial<ServerMemberDefinition>): ServerM
   };
 }
 
+function normalizeBotPresenceStatus(value: unknown): BotPresenceStatus {
+  return value === "ONLINE" || value === "IDLE" || value === "OFFLINE" ? value : "OFFLINE";
+}
+
+function normalizeBotCommandLanguage(value: unknown): BotCommandLanguage {
+  return value === "reply" || value === "javascript" || value === "python" || value === "java" || value === "other" ? value : "actions";
+}
+
+function normalizeBotCommandName(value: unknown, fallback: string) {
+  const cleanName = String(value ?? "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/^\W+/, "")
+    .slice(0, 24);
+  return cleanName || fallback;
+}
+
+function createBotCustomCommandId() {
+  return `bot-command-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeBotCustomCommand(command: unknown, index: number): BotCustomCommand | null {
+  if (!command || typeof command !== "object") {
+    return null;
+  }
+
+  const rawCommand = command as Partial<BotCustomCommand>;
+  const name = normalizeBotCommandName(rawCommand.name, `comando${index + 1}`);
+  const code = typeof rawCommand.code === "string" ? rawCommand.code.replace(/\r\n/g, "\n").slice(0, botCustomCommandCodeMaxLength) : "";
+  return {
+    id: typeof rawCommand.id === "string" && rawCommand.id.trim() ? rawCommand.id.trim().slice(0, 64) : createBotCustomCommandId(),
+    name,
+    language: normalizeBotCommandLanguage(rawCommand.language),
+    code,
+    enabled: rawCommand.enabled !== false
+  };
+}
+
+function normalizeBotCustomCommands(commands: unknown): BotCustomCommand[] {
+  if (!Array.isArray(commands)) {
+    return [];
+  }
+
+  const seenNames = new Set<string>();
+  const normalizedCommands: BotCustomCommand[] = [];
+  for (const [index, command] of commands.entries()) {
+    const normalizedCommand = normalizeBotCustomCommand(command, index);
+    if (!normalizedCommand) {
+      continue;
+    }
+
+    const key = normalizedCommand.name.toLowerCase();
+    if (seenNames.has(key)) {
+      continue;
+    }
+
+    seenNames.add(key);
+    normalizedCommands.push(normalizedCommand);
+    if (normalizedCommands.length >= maxBotCustomCommands) {
+      break;
+    }
+  }
+
+  return normalizedCommands;
+}
+
+function createDefaultBotCustomCommand(existingCommands: BotCustomCommand[] = []): BotCustomCommand {
+  const usedNames = new Set(existingCommands.map((command) => command.name.toLowerCase()));
+  let nextIndex = existingCommands.length + 1;
+  let name = `comando${nextIndex}`;
+  while (usedNames.has(name.toLowerCase())) {
+    nextIndex += 1;
+    name = `comando${nextIndex}`;
+  }
+
+  return {
+    id: createBotCustomCommandId(),
+    name,
+    language: "actions",
+    code: "reply Resposta do bot. Use {args}, {server}, {bot} ou {command} se quiser.",
+    enabled: true
+  };
+}
+
+function getBotCustomCommandsSignature(commands: BotCustomCommand[]) {
+  return commands
+    .map((command) => [command.id, command.name, command.language, command.enabled ? "1" : "0", command.code].join("\u0001"))
+    .join("\u0002");
+}
+
 function normalizeServerBot(bot: Partial<ServerBotIntegration>): ServerBotIntegration {
   const id = String(bot.id || `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const platform: BotPlatform = bot.platform === "tempest" ? "tempest" : "discord";
@@ -2707,6 +2824,7 @@ function normalizeServerBot(bot: Partial<ServerBotIntegration>): ServerBotIntegr
     Array.isArray(bot.commandModules) && bot.commandModules.length
       ? bot.commandModules.filter((module): module is BotCommandModule => defaultBotCommandModules.includes(module as BotCommandModule))
       : defaultBotCommandModules;
+  const presence = normalizeBotPresenceStatus(bot.presence);
   return {
     id,
     platform,
@@ -2720,6 +2838,7 @@ function normalizeServerBot(bot: Partial<ServerBotIntegration>): ServerBotIntegr
     discordApplicationId: platform === "discord" && typeof bot.discordApplicationId === "string" && bot.discordApplicationId.trim() ? bot.discordApplicationId : null,
     bridgeStatus: platform === "tempest" ? "connected" : bot.bridgeStatus === "connected" || bot.bridgeStatus === "error" ? bot.bridgeStatus : "pending",
     runtimeEnabled: bot.runtimeEnabled ?? true,
+    presence,
     prefix: rawPrefix,
     commandName: rawCommandName || "ping",
     replyText:
@@ -2728,6 +2847,7 @@ function normalizeServerBot(bot: Partial<ServerBotIntegration>): ServerBotIntegr
         : "Pong! Bot funcionando dentro do Tempest Light.",
     commandChannelNames: Array.isArray(bot.commandChannelNames) ? bot.commandChannelNames.map(String).slice(0, 80) : [],
     commandModules,
+    customCommands: normalizeBotCustomCommands(bot.customCommands),
     addedBy: String(bot.addedBy || "Sistema").slice(0, 48),
     addedAt: typeof bot.addedAt === "string" ? bot.addedAt : new Date().toISOString()
   };
@@ -2741,7 +2861,7 @@ function createServerBotMember(bot: ServerBotIntegration): ServerMemberDefinitio
     avatarUrl: bot.avatarUrl,
     bannerUrl: bot.bannerUrl,
     bio: bot.description,
-    presence: isBotRuntimeOnline(bot) ? "ONLINE" : "OFFLINE",
+    presence: getBotRuntimePresence(bot),
     starBalance: 0,
     accountCreatedAt: bot.addedAt,
     joinedAt: bot.addedAt,
@@ -2783,6 +2903,8 @@ function createServerBotFromToken(
     replyText?: string;
     commandChannelNames?: string[];
     commandModules?: BotCommandModule[];
+    customCommands?: BotCustomCommand[];
+    presence?: BotPresenceStatus;
   }
 ) {
   const cleanToken = token.trim();
@@ -2812,11 +2934,13 @@ function createServerBotFromToken(
     discordApplicationId: platform === "discord" ? options?.discordApplicationId ?? null : null,
     bridgeStatus: options?.bridgeStatus ?? (platform === "tempest" ? "connected" : "pending"),
     runtimeEnabled: true,
+    presence: options?.presence ?? "OFFLINE",
     prefix: options?.prefix?.trim().slice(0, 4) || "!",
     commandName,
     replyText: options?.replyText?.trim().slice(0, 240) || "Pong! Bot funcionando dentro do Tempest Light.",
     commandChannelNames: options?.commandChannelNames ?? [],
     commandModules: options?.commandModules?.length ? options.commandModules : defaultBotCommandModules,
+    customCommands: options?.customCommands ?? [],
     addedBy: user.displayName,
     addedAt: now
   };
@@ -3577,7 +3701,7 @@ function normalizeSavedServer(server: Partial<ServerDefinition>, user: AuthUser)
     }
 
     const bot = botById.get(member.id);
-    return { ...member, presence: bot && isBotRuntimeOnline(bot) ? "ONLINE" as PresenceStatus : "OFFLINE" as PresenceStatus };
+    return { ...member, presence: bot ? getBotRuntimePresence(bot) : "OFFLINE" as PresenceStatus };
   });
   const normalizedTimeouts = (
     Array.isArray(server.timeouts)
@@ -11723,16 +11847,148 @@ function botAllowsChannel(bot: ServerBotIntegration, channelName: string) {
   return !bot.commandChannelNames.length || bot.commandChannelNames.includes(channelName);
 }
 
+function getBotRuntimePresence(bot: ServerBotIntegration): PresenceStatus {
+  return bot.platform === "tempest" && bot.runtimeEnabled ? bot.presence : "OFFLINE";
+}
+
 function isBotRuntimeOnline(bot: ServerBotIntegration) {
-  return bot.platform === "tempest" && bot.runtimeEnabled;
+  return getBotRuntimePresence(bot) !== "OFFLINE";
 }
 
 function botCanRespondInTempest(bot: ServerBotIntegration) {
-  return bot.platform === "tempest" && bot.runtimeEnabled;
+  return bot.platform === "tempest" && bot.runtimeEnabled && bot.presence !== "OFFLINE";
 }
 
 function botHasModule(bot: ServerBotIntegration, module: BotCommandModule) {
   return bot.commandModules.includes(module);
+}
+
+function renderBotCommandTemplate(template: string, commandName: string, args: string, bot: ServerBotIntegration, server: ServerDefinition) {
+  const values: Record<string, string> = {
+    args,
+    bot: bot.displayName,
+    command: `${bot.prefix}${commandName}`,
+    server: server.name
+  };
+
+  return Object.entries(values)
+    .reduce((message, [key, value]) => message.replace(new RegExp(`\\{${key}\\}`, "gi"), value), template)
+    .trim()
+    .slice(0, 1000);
+}
+
+function decodeBotStringLiteral(value: string) {
+  return value
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, "\"")
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
+
+function extractSafeBotCodeReply(code: string) {
+  const patterns = [
+    /console\.log\(\s*(["'`])([\s\S]{1,1000}?)\1\s*\)/,
+    /print\(\s*(["'])([\s\S]{1,1000}?)\1\s*\)/,
+    /System\.out\.println\(\s*(")([\s\S]{1,1000}?)"\s*\)/,
+    /return\s+(["'`])([\s\S]{1,1000}?)\1/
+  ];
+
+  for (const pattern of patterns) {
+    const match = code.match(pattern);
+    if (match?.[2]) {
+      return decodeBotStringLiteral(match[2]);
+    }
+  }
+
+  return null;
+}
+
+function getBotActionCommandText(code: string, commandName: string, args: string, bot: ServerBotIntegration, server: ServerDefinition) {
+  const trimmedCode = code.trim();
+  if (!trimmedCode) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmedCode) as { action?: unknown; text?: unknown; choices?: unknown; query?: unknown };
+    const action = typeof parsed.action === "string" ? parsed.action.toLowerCase() : "";
+    if (["reply", "responder", "send", "enviar"].includes(action) && typeof parsed.text === "string") {
+      return renderBotCommandTemplate(parsed.text, commandName, args, bot, server);
+    }
+    if (["random", "sortear", "escolher"].includes(action) && Array.isArray(parsed.choices)) {
+      const choices = parsed.choices.map(String).map((choice) => choice.trim()).filter(Boolean).slice(0, 50);
+      if (choices.length) {
+        return renderBotCommandTemplate(choices[Math.floor(Math.random() * choices.length)], commandName, args, bot, server);
+      }
+    }
+    if (["play", "tocar", "music", "musica"].includes(action)) {
+      const query = typeof parsed.query === "string" && parsed.query.trim() ? parsed.query.trim() : args;
+      return query ? `Preparando musica: ${renderBotCommandTemplate(query, commandName, args, bot, server)}.` : "Entre em um canal de voz e envie o nome ou link da musica.";
+    }
+  } catch {
+    // Non-JSON action scripts are parsed below.
+  }
+
+  const line = trimmedCode
+    .split("\n")
+    .map((item) => item.trim())
+    .find((item) => item && !item.startsWith("//") && !item.startsWith("#"));
+  if (!line) {
+    return null;
+  }
+
+  const actionMatch = line.match(/^(reply|responder|send|enviar|random|sortear|escolher|play|tocar|music|musica|status|help|ajuda)\b[:\s-]*(.*)$/i);
+  if (!actionMatch) {
+    return null;
+  }
+
+  const action = actionMatch[1].toLowerCase();
+  const payload = actionMatch[2].trim();
+  if (["reply", "responder", "send", "enviar"].includes(action)) {
+    return renderBotCommandTemplate(payload || bot.replyText, commandName, args, bot, server);
+  }
+  if (["random", "sortear", "escolher"].includes(action)) {
+    const choices = payload
+      .split("|")
+      .map((choice) => choice.trim())
+      .filter(Boolean)
+      .slice(0, 50);
+    return choices.length ? renderBotCommandTemplate(choices[Math.floor(Math.random() * choices.length)], commandName, args, bot, server) : null;
+  }
+  if (["play", "tocar", "music", "musica"].includes(action)) {
+    const query = payload || args;
+    return query ? `Preparando musica: ${renderBotCommandTemplate(query, commandName, args, bot, server)}.` : "Entre em um canal de voz e envie o nome ou link da musica.";
+  }
+  if (action === "status") {
+    return `${bot.displayName} esta ${getPresenceLabel(getBotRuntimePresence(bot))} em ${server.name}.`;
+  }
+
+  return `Use ${bot.prefix}${bot.commandName}, ${bot.prefix}help ou um comando personalizado ativo.`;
+}
+
+function getBotCustomCommandText(bot: ServerBotIntegration, commandName: string, args: string, server: ServerDefinition) {
+  const loweredCommand = commandName.toLowerCase();
+  const customCommand = bot.customCommands.find((command) => command.enabled && command.name.toLowerCase() === loweredCommand);
+  if (!customCommand) {
+    return null;
+  }
+
+  if (customCommand.language === "actions") {
+    return getBotActionCommandText(customCommand.code, commandName, args, bot, server) ?? bot.replyText;
+  }
+
+  if (customCommand.language === "reply") {
+    return renderBotCommandTemplate(customCommand.code || bot.replyText, commandName, args, bot, server);
+  }
+
+  const safeReply = extractSafeBotCodeReply(customCommand.code);
+  if (safeReply) {
+    return renderBotCommandTemplate(safeReply, commandName, args, bot, server);
+  }
+
+  return `Comando ${bot.prefix}${customCommand.name} salvo em ${botCommandLanguageLabels[customCommand.language]}. Para executar codigo real, conecte esse bot a um runner/hospedagem segura.`;
 }
 
 function getBotCommandText(bot: ServerBotIntegration, commandName: string, args: string, server: ServerDefinition) {
@@ -11741,9 +11997,18 @@ function getBotCommandText(bot: ServerBotIntegration, commandName: string, args:
     return bot.replyText;
   }
 
+  const customCommandText = getBotCustomCommandText(bot, commandName, args, server);
+  if (customCommandText) {
+    return customCommandText;
+  }
+
   if (botHasModule(bot, "utility") && ["help", "ajuda", "comandos"].includes(loweredCommand)) {
     const modules = bot.commandModules.map((module) => botCommandModuleLabels[module]).join(", ");
-    return `Comandos ativos: ${bot.prefix}${bot.commandName}, ${bot.prefix}help. Modulos liberados: ${modules}.`;
+    const customCommands = bot.customCommands
+      .filter((command) => command.enabled)
+      .map((command) => `${bot.prefix}${command.name}`)
+      .join(", ");
+    return `Comandos ativos: ${bot.prefix}${bot.commandName}, ${bot.prefix}help${customCommands ? `, ${customCommands}` : ""}. Modulos liberados: ${modules}.`;
   }
 
   if (botHasModule(bot, "utility") && ["ping", "status"].includes(loweredCommand)) {
@@ -14347,6 +14612,44 @@ function ServerSettingsDialog({
     updateBot(bot.id, { commandChannelNames: nextChannels });
   }
 
+  function addSavedBotCustomCommand(bot: ServerBotIntegration) {
+    if (bot.customCommands.length >= maxBotCustomCommands) {
+      setSettingsNotice(`Cada bot pode ter no maximo ${maxBotCustomCommands} comandos personalizados.`);
+      return;
+    }
+
+    updateBot(bot.id, { customCommands: [...bot.customCommands, createDefaultBotCustomCommand(bot.customCommands)] });
+  }
+
+  function updateSavedBotCustomCommand(bot: ServerBotIntegration, commandId: string, patch: Partial<BotCustomCommand>) {
+    const commandIndex = bot.customCommands.findIndex((command) => command.id === commandId);
+    if (commandIndex === -1) {
+      return;
+    }
+
+    const nextCommand = normalizeBotCustomCommand({ ...bot.customCommands[commandIndex], ...patch }, commandIndex);
+    if (!nextCommand) {
+      return;
+    }
+
+    if (
+      bot.customCommands.some(
+        (command) => command.id !== commandId && command.name.toLowerCase() === nextCommand.name.toLowerCase()
+      )
+    ) {
+      setSettingsNotice("Ja existe outro comando com esse nome neste bot.");
+      return;
+    }
+
+    updateBot(bot.id, {
+      customCommands: bot.customCommands.map((command) => (command.id === commandId ? nextCommand : command))
+    });
+  }
+
+  function deleteSavedBotCustomCommand(bot: ServerBotIntegration, commandId: string) {
+    updateBot(bot.id, { customCommands: bot.customCommands.filter((command) => command.id !== commandId) });
+  }
+
   async function loadBotImage(
     event: ChangeEvent<HTMLInputElement>,
     applyImage: (imageDataUrl: string) => void,
@@ -14513,11 +14816,13 @@ function ServerSettingsDialog({
       currentBot.bannerUrl === nextBot.bannerUrl &&
       currentBot.description === nextBot.description &&
       currentBot.runtimeEnabled === nextBot.runtimeEnabled &&
+      currentBot.presence === nextBot.presence &&
       currentBot.prefix === nextBot.prefix &&
       currentBot.commandName === nextBot.commandName &&
       currentBot.replyText === nextBot.replyText &&
       currentBot.commandChannelNames.join("|") === nextBot.commandChannelNames.join("|") &&
-      currentBot.commandModules.join("|") === nextBot.commandModules.join("|");
+      currentBot.commandModules.join("|") === nextBot.commandModules.join("|") &&
+      getBotCustomCommandsSignature(currentBot.customCommands) === getBotCustomCommandsSignature(nextBot.customCommands);
     if (unchanged) {
       return;
     }
@@ -14533,7 +14838,7 @@ function ServerSettingsDialog({
                 avatarUrl: nextBot.avatarUrl,
                 bannerUrl: nextBot.bannerUrl,
                 bio: nextBot.description,
-                presence: isBotRuntimeOnline(nextBot) ? "ONLINE" : "OFFLINE"
+                presence: getBotRuntimePresence(nextBot)
               }
             : member
         )
@@ -16752,13 +17057,14 @@ function ServerSettingsDialog({
                   </span>
                   <span>
                     Status no Tempest:{" "}
-                    {isBotRuntimeOnline(bot)
-                      ? "online enquanto o runtime interno estiver ligado"
-                      : bot.platform === "tempest"
-                        ? "desativado neste servidor"
-                        : "offline ate a ponte real do bot estar rodando"}
+                    {bot.platform === "tempest" && bot.runtimeEnabled
+                      ? `${getPresenceLabel(getBotRuntimePresence(bot))} escolhido pelo dono`
+                      : "offline ate o bot estar ativo"}
                   </span>
-                  <span>Comandos: {bot.prefix}{bot.commandName}, {bot.prefix}help, {bot.prefix}play, {bot.prefix}ban, {bot.prefix}dado, {bot.prefix}saldo</span>
+                  <span>
+                    Comandos: {bot.prefix}{bot.commandName}, {bot.prefix}help, {bot.prefix}play, {bot.prefix}ban, {bot.prefix}dado, {bot.prefix}saldo
+                    {bot.customCommands.length ? `, ${bot.customCommands.map((command) => `${bot.prefix}${command.name}`).join(", ")}` : ""}
+                  </span>
                   <span>Canais: {bot.commandChannelNames.length ? bot.commandChannelNames.map((channel) => `#${channel}`).join(", ") : "todos os canais de texto"}</span>
                   {bot.platform === "tempest" && bot.internalToken ? <code className="bot-token-code">{bot.internalToken}</code> : null}
                   <small>Adicionado em {new Date(bot.addedAt).toLocaleString("pt-BR")}</small>
@@ -16794,18 +17100,60 @@ function ServerSettingsDialog({
                     aria-label="Descricao do bot"
                     placeholder="Descricao do bot"
                   />
-                  <input
-                    defaultValue={bot.avatarUrl ?? ""}
-                    onBlur={(event) => updateBot(bot.id, { avatarUrl: sanitizeImageSource(event.target.value) })}
-                    aria-label="URL da foto do bot"
-                    placeholder="URL da foto do bot"
-                  />
-                  <input
-                    defaultValue={bot.bannerUrl ?? ""}
-                    onBlur={(event) => updateBot(bot.id, { bannerUrl: sanitizeImageSource(event.target.value) })}
-                    aria-label="URL do banner do bot"
-                    placeholder="URL do banner do bot"
-                  />
+                  <label className="bot-presence-control">
+                    Status
+                    <select
+                      value={bot.presence}
+                      disabled={bot.platform !== "tempest" || !bot.runtimeEnabled}
+                      onChange={(event) => updateBot(bot.id, { presence: event.target.value as BotPresenceStatus })}
+                    >
+                      {botPresenceOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="bot-saved-media-editor">
+                    <div className="bot-media-field compact">
+                      <div className="bot-media-preview avatar">{bot.avatarUrl ? <SafePreviewImage src={bot.avatarUrl} alt="" /> : <Bot size={20} />}</div>
+                      <label className="upload-button">
+                        <Upload size={16} />
+                        Foto
+                        <input
+                          accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif"
+                          type="file"
+                          onChange={(event) =>
+                            void loadBotImage(event, (imageDataUrl) => updateBot(bot.id, { avatarUrl: imageDataUrl }), { width: 256, height: 256 })
+                          }
+                        />
+                      </label>
+                      {bot.avatarUrl ? (
+                        <button className="ghost-button" type="button" onClick={() => updateBot(bot.id, { avatarUrl: null })}>
+                          Remover
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="bot-media-field compact">
+                      <div className="bot-media-preview banner">{bot.bannerUrl ? <SafePreviewImage src={bot.bannerUrl} alt="" /> : <ImageIcon size={20} />}</div>
+                      <label className="upload-button">
+                        <Upload size={16} />
+                        Banner
+                        <input
+                          accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.avif"
+                          type="file"
+                          onChange={(event) =>
+                            void loadBotImage(event, (imageDataUrl) => updateBot(bot.id, { bannerUrl: imageDataUrl }), { width: 960, height: 320 })
+                          }
+                        />
+                      </label>
+                      {bot.bannerUrl ? (
+                        <button className="ghost-button" type="button" onClick={() => updateBot(bot.id, { bannerUrl: null })}>
+                          Remover
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
                 <details className="bot-saved-details">
                   <summary>
@@ -16848,6 +17196,80 @@ function ServerSettingsDialog({
                       </div>
                     ) : null}
                   </div>
+                </details>
+                <details className="bot-saved-details bot-command-details">
+                  <summary>
+                    <span>Comandos personalizados</span>
+                    <ChevronDown size={16} />
+                  </summary>
+                  <div className="bot-command-actions">
+                    <span>{bot.customCommands.length}/{maxBotCustomCommands} comandos</span>
+                    <button type="button" onClick={() => addSavedBotCustomCommand(bot)}>
+                      <Plus size={16} />
+                      Adicionar comando
+                    </button>
+                  </div>
+                  {bot.customCommands.length ? (
+                    <div className="bot-custom-command-list">
+                      {bot.customCommands.map((command) => (
+                        <div className="bot-custom-command" key={command.id}>
+                          <div className="bot-custom-command-header">
+                            <label className="checkbox-row">
+                              <input
+                                checked={command.enabled}
+                                onChange={(event) => updateSavedBotCustomCommand(bot, command.id, { enabled: event.target.checked })}
+                                type="checkbox"
+                              />
+                              Ativo
+                            </label>
+                            <button className="icon-button bot-delete-button" title="Excluir comando" type="button" onClick={() => deleteSavedBotCustomCommand(bot, command.id)}>
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                          <div className="bot-custom-command-grid">
+                            <label>
+                              Nome do comando
+                              <input
+                                defaultValue={command.name}
+                                onBlur={(event) => updateSavedBotCustomCommand(bot, command.id, { name: event.target.value })}
+                                aria-label="Nome do comando personalizado"
+                              />
+                            </label>
+                            <label>
+                              Linguagem
+                              <select
+                                value={command.language}
+                                onChange={(event) => updateSavedBotCustomCommand(bot, command.id, { language: event.target.value as BotCommandLanguage })}
+                              >
+                                {Object.entries(botCommandLanguageLabels).map(([value, label]) => (
+                                  <option key={value} value={value}>
+                                    {label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <label className="bot-code-editor">
+                            Codigo do comando
+                            <textarea
+                              defaultValue={command.code}
+                              onBlur={(event) => updateSavedBotCustomCommand(bot, command.id, { code: event.target.value })}
+                              spellCheck={false}
+                              rows={7}
+                            />
+                          </label>
+                          <small>
+                            Executa no Tempest com: reply texto, random opcao 1 | opcao 2, play {"{args}"} ou status. Java/Python/JS aceitam print/console.log/System.out.println como resposta segura.
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="empty-state compact-empty">
+                      <Bot size={24} />
+                      <p>Nenhum comando personalizado salvo para este bot.</p>
+                    </div>
+                  )}
                 </details>
               </article>
             ))
