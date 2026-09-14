@@ -32,6 +32,80 @@ function isUpdateFeedConfigured() {
   return Boolean(url && !/SEU_USUARIO|SEU_REPOSITORIO/i.test(url));
 }
 
+function getUpdateDataDir() {
+  try {
+    return path.join(app.getPath("userData"), "updates");
+  } catch {
+    return path.join(os.tmpdir(), "Tempest Light", "updates");
+  }
+}
+
+function getUpdateLogPath() {
+  const logDir = path.join(getUpdateDataDir(), "logs");
+  fs.mkdirSync(logDir, { recursive: true });
+  return path.join(logDir, "updater.log");
+}
+
+function getUpdateStatePath() {
+  return path.join(getUpdateDataDir(), "last-update-attempt.json");
+}
+
+function formatUpdateLogDetails(details) {
+  if (details == null) {
+    return "";
+  }
+
+  if (details instanceof Error) {
+    return ` ${details.stack || details.message}`;
+  }
+
+  try {
+    return ` ${JSON.stringify(details)}`;
+  } catch {
+    return ` ${String(details)}`;
+  }
+}
+
+function writeUpdateLog(message, details) {
+  try {
+    fs.appendFileSync(getUpdateLogPath(), `[${new Date().toISOString()}] ${message}${formatUpdateLogDetails(details)}${os.EOL}`, "utf8");
+  } catch {
+    // Logging must never block startup or the update flow.
+  }
+}
+
+function readUpdateState() {
+  try {
+    return JSON.parse(fs.readFileSync(getUpdateStatePath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeUpdateState(state) {
+  try {
+    const statePath = getUpdateStatePath();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+  } catch (error) {
+    writeUpdateLog("Failed to persist update state.", error);
+  }
+}
+
+function getRecentFailedUpdate(manifestVersion) {
+  const state = readUpdateState();
+  if (!state || state.status !== "failed" || state.targetVersion !== manifestVersion) {
+    return null;
+  }
+
+  const finishedAt = Date.parse(state.finishedAt ?? "");
+  if (!Number.isFinite(finishedAt)) {
+    return state;
+  }
+
+  return Date.now() - finishedAt < 10 * 60 * 1000 ? state : null;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     title: "Tempest Light",
@@ -333,11 +407,34 @@ function registerIpc() {
     }
 
     try {
+      writeUpdateLog("Checking for desktop update.", {
+        currentVersion: app.getVersion(),
+        feedUrl: runtimeConfig.updateFeedUrl
+      });
       const manifest = await fetchUpdateManifest();
+      writeUpdateLog("Desktop update manifest loaded.", {
+        currentVersion: app.getVersion(),
+        availableVersion: manifest.version,
+        setupUrl: manifest.setupUrl
+      });
 
       if (compareVersions(manifest.version, app.getVersion()) <= 0) {
         latestManifest = null;
+        writeUpdateLog("No desktop update available.", {
+          currentVersion: app.getVersion(),
+          availableVersion: manifest.version
+        });
         return { status: "current" };
+      }
+
+      const failedAttempt = getRecentFailedUpdate(manifest.version);
+      if (failedAttempt) {
+        writeUpdateLog("Recent update attempt failed; suppressing immediate update loop.", failedAttempt);
+        return {
+          status: "error",
+          version: manifest.version,
+          message: `A tentativa anterior de atualizar para ${manifest.version} nao confirmou a instalacao. Versao atual: ${app.getVersion()}. Log: ${failedAttempt.logPath ?? getUpdateLogPath()}`
+        };
       }
 
       latestManifest = manifest;
@@ -347,6 +444,7 @@ function registerIpc() {
         notes: manifest.changelog ?? null
       };
     } catch (error) {
+      writeUpdateLog("Failed to check desktop update.", error);
       return {
         status: "error",
         message: error instanceof Error ? error.message : "Falha ao verificar atualizacoes."
@@ -371,7 +469,16 @@ function registerIpc() {
 
     try {
       const manifest = latestManifest ?? (await fetchUpdateManifest());
+      writeUpdateLog("Desktop update installation requested.", {
+        currentVersion: app.getVersion(),
+        targetVersion: manifest.version,
+        setupUrl: manifest.setupUrl
+      });
       if (compareVersions(manifest.version, app.getVersion()) <= 0) {
+        writeUpdateLog("Desktop update installation skipped because current version is already up to date.", {
+          currentVersion: app.getVersion(),
+          targetVersion: manifest.version
+        });
         return {
           ok: false,
           message: "O programa ja esta na versao mais recente conhecida."
@@ -380,11 +487,26 @@ function registerIpc() {
 
       const installerPath = await downloadJsonInstaller(manifest);
       sendUpdateProgress({ percent: 100, transferred: 1, total: 1 });
+      writeUpdateState({
+        status: "pending",
+        stage: "helper-started",
+        currentVersion: app.getVersion(),
+        targetVersion: manifest.version,
+        installerPath,
+        logPath: getUpdateLogPath(),
+        startedAt: new Date().toISOString()
+      });
+      writeUpdateLog("Desktop update helper will start and the app will exit.", {
+        currentVersion: app.getVersion(),
+        targetVersion: manifest.version,
+        installerPath
+      });
 
-      startSilentUpdateInstaller(installerPath);
+      startSilentUpdateInstaller(installerPath, manifest.version);
       setTimeout(exitForUpdate, 500);
       return { ok: true };
     } catch (error) {
+      writeUpdateLog("Failed before desktop update helper could start.", error);
       return {
         ok: false,
         message: error instanceof Error ? error.message : "Falha ao instalar atualizacao."
@@ -407,7 +529,7 @@ function exitForUpdate() {
   app.exit(0);
 }
 
-function startSilentUpdateInstaller(installerPath) {
+function startSilentUpdateInstaller(installerPath, targetVersion) {
   const launcherPath = process.execPath;
 
   if (process.platform !== "win32") {
@@ -420,8 +542,10 @@ function startSilentUpdateInstaller(installerPath) {
   }
 
   const updateScriptPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.ps1`);
-  const updateLogPath = path.join(os.tmpdir(), "tempest-light-update.log");
+  const updateLogPath = getUpdateLogPath();
+  const updateStatePath = getUpdateStatePath();
   const installDir = path.dirname(launcherPath);
+  const launcherProcessName = path.basename(launcherPath, path.extname(launcherPath));
   const fallbackLauncherPath = path.join(
     process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
     "Programs",
@@ -435,34 +559,102 @@ function startSilentUpdateInstaller(installerPath) {
     "  $stamp = Get-Date -Format o",
     "  Add-Content -LiteralPath $logPath -Value \"[$stamp] $message\"",
     "}",
-    `Write-TempestUpdateLog 'Starting update helper from PID ${process.pid}.'`,
-    `try { Wait-Process -Id ${process.pid} -Timeout 120 } catch {}`,
+    "function Write-TempestUpdateState([string] $status, [string] $stage, [string] $installedVersion, [int] $installerExitCode, [string] $launcherPath) {",
+    "  $payload = [ordered]@{",
+    "    status = $status",
+    "    stage = $stage",
+    "    targetVersion = $targetVersion",
+    "    installedVersion = $installedVersion",
+    "    installerExitCode = $installerExitCode",
+    "    launcherPath = $launcherPath",
+    "    logPath = $logPath",
+    "    finishedAt = (Get-Date -Format o)",
+    "  }",
+    "  $payload | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8",
+    "}",
+    "function Get-TempestInstalledVersion([string] $candidatePath) {",
+    "  if (-not (Test-Path -LiteralPath $candidatePath)) { return $null }",
+    "  $versionInfo = (Get-Item -LiteralPath $candidatePath).VersionInfo",
+    "  if ($versionInfo.ProductVersion) { return $versionInfo.ProductVersion.Trim() }",
+    "  if ($versionInfo.FileVersion) { return $versionInfo.FileVersion.Trim() }",
+    "  return $null",
+    "}",
+    "function Test-TempestTargetVersion([string] $candidatePath) {",
+    "  $actualVersion = Get-TempestInstalledVersion $candidatePath",
+    "  Write-TempestUpdateLog \"Version check for $candidatePath returned $actualVersion; expected $targetVersion.\"",
+    "  if (-not $actualVersion) { return $false }",
+    "  return $actualVersion -eq $targetVersion -or $actualVersion.StartsWith($targetVersion + '.')",
+    "}",
+    "function Stop-TempestProcesses {",
+    "  Get-Process -Name $launcherProcessName | Where-Object { $_.Id -ne $PID } | Stop-Process -Force",
+    "  Start-Sleep -Seconds 2",
+    "}",
+    `$statePath = ${quotePowerShellValue(updateStatePath)}`,
+    `$targetVersion = ${quotePowerShellValue(targetVersion)}`,
     `$installerPath = ${quotePowerShellValue(installerPath)}`,
     `$installDir = ${quotePowerShellValue(installDir)}`,
+    `$launcherProcessName = ${quotePowerShellValue(launcherProcessName)}`,
     `$launcherCandidates = @(${quotePowerShellValue(launcherPath)}, ${quotePowerShellValue(fallbackLauncherPath)}) | Select-Object -Unique`,
-    "$installerArguments = '/S /currentuser /D=' + $installDir",
-    "Write-TempestUpdateLog \"Running installer: $installerPath $installerArguments\"",
-    "$installerProcess = Start-Process -FilePath $installerPath -ArgumentList $installerArguments -PassThru -Wait -WindowStyle Hidden",
-    "$installerExitCode = if ($installerProcess) { $installerProcess.ExitCode } else { $LASTEXITCODE }",
-    "Write-TempestUpdateLog \"Installer finished with exit code $installerExitCode.\"",
-    "Start-Sleep -Seconds 2",
+    `Write-TempestUpdateLog 'Starting update helper from PID ${process.pid}.'`,
+    "Write-TempestUpdateState 'running' 'waiting-for-main-process-exit' $null 0 $null",
+    `try { Wait-Process -Id ${process.pid} -Timeout 120 } catch {}`,
+    "Stop-TempestProcesses",
+    "$verifiedLauncherPath = $null",
+    "$installedVersion = $null",
+    "$installerExitCode = -1",
+    "for ($installAttempt = 1; $installAttempt -le 3 -and -not $verifiedLauncherPath; $installAttempt += 1) {",
+    "  Write-TempestUpdateState 'running' \"installing-attempt-$installAttempt\" $installedVersion $installerExitCode $null",
+    "  $installerArguments = '/S /currentuser --updated /D=' + $installDir",
+    "  Write-TempestUpdateLog \"Running installer attempt $installAttempt: $installerPath $installerArguments\"",
+    "  try {",
+    "    $installerProcess = Start-Process -FilePath $installerPath -ArgumentList $installerArguments -PassThru -Wait -WindowStyle Hidden",
+    "    $installerExitCode = if ($installerProcess) { $installerProcess.ExitCode } else { $LASTEXITCODE }",
+    "  } catch {",
+    "    $installerExitCode = -1",
+    "    Write-TempestUpdateLog \"Installer attempt $installAttempt failed to start or wait: $($_.Exception.Message)\"",
+    "  }",
+    "  Write-TempestUpdateLog \"Installer attempt $installAttempt finished with exit code $installerExitCode.\"",
+    "  Start-Sleep -Seconds 2",
+    "  foreach ($candidatePath in $launcherCandidates) {",
+    "    $installedVersion = Get-TempestInstalledVersion $candidatePath",
+    "    if (Test-TempestTargetVersion $candidatePath) {",
+    "      $verifiedLauncherPath = $candidatePath",
+    "      break",
+    "    }",
+    "  }",
+    "  if (-not $verifiedLauncherPath) {",
+    "    Write-TempestUpdateLog \"Target version was not confirmed after installer attempt $installAttempt.\"",
+    "    Stop-TempestProcesses",
+    "    Start-Sleep -Seconds 2",
+    "  }",
+    "}",
     "$launched = $false",
-    "for ($attempt = 1; $attempt -le 60 -and -not $launched; $attempt += 1) {",
-    "  foreach ($launcherPath in $launcherCandidates) {",
-    "    if (-not (Test-Path -LiteralPath $launcherPath)) { continue }",
-    "    $launcherDir = Split-Path -Parent $launcherPath",
-    "    Write-TempestUpdateLog \"Launching Tempest Light from $launcherPath. Attempt $attempt.\"",
-    "    $startedProcess = Start-Process -FilePath $launcherPath -ArgumentList @('--updated') -WorkingDirectory $launcherDir -PassThru",
+    "if ($verifiedLauncherPath) {",
+    "  Write-TempestUpdateState 'success' 'version-confirmed' $installedVersion $installerExitCode $verifiedLauncherPath",
+    "  for ($attempt = 1; $attempt -le 60 -and -not $launched; $attempt += 1) {",
+    "    $launcherDir = Split-Path -Parent $verifiedLauncherPath",
+    "    Write-TempestUpdateLog \"Launching Tempest Light from $verifiedLauncherPath. Attempt $attempt.\"",
+    "    $startedProcess = Start-Process -FilePath $verifiedLauncherPath -ArgumentList @('--updated') -WorkingDirectory $launcherDir -PassThru",
     "    Start-Sleep -Seconds 3",
-    "    $processName = [System.IO.Path]::GetFileNameWithoutExtension($launcherPath)",
-    "    $running = Get-Process -Name $processName | Select-Object -First 1",
+    "    $running = Get-Process -Name $launcherProcessName | Select-Object -First 1",
     "    if (($startedProcess -and -not $startedProcess.HasExited) -or $running) {",
     "      Write-TempestUpdateLog 'Tempest Light relaunched successfully.'",
     "      $launched = $true",
     "      break",
     "    }",
+    "    Start-Sleep -Seconds 1",
     "  }",
-    "  if (-not $launched) { Start-Sleep -Seconds 1 }",
+    "  if ($launched) { Remove-Item -LiteralPath $installerPath -Force }",
+    "} else {",
+    "  Write-TempestUpdateState 'failed' 'version-verification-failed' $installedVersion $installerExitCode $null",
+    "  Write-TempestUpdateLog \"Failed to confirm target version $targetVersion after installer attempts.\"",
+    "  foreach ($launcherPath in $launcherCandidates) {",
+    "    if (Test-Path -LiteralPath $launcherPath) {",
+    "      $launcherDir = Split-Path -Parent $launcherPath",
+    "      Start-Process -FilePath $launcherPath -ArgumentList @('--update-failed') -WorkingDirectory $launcherDir",
+    "      break",
+    "    }",
+    "  }",
     "}",
     "if (-not $launched) { Write-TempestUpdateLog 'Failed to relaunch Tempest Light after update.' }",
     "Write-TempestUpdateLog 'Update helper finished.'",
@@ -593,12 +785,19 @@ async function fetchUpdateManifest() {
   }
 
   const manifestUrl = new URL(runtimeConfig.updateFeedUrl);
+  writeUpdateLog("Downloading update manifest.", { manifestUrl: manifestUrl.toString() });
   const body = await downloadBuffer(manifestUrl);
   const manifest = JSON.parse(body.toString("utf8"));
 
   if (!manifest || typeof manifest.version !== "string" || typeof manifest.setupUrl !== "string") {
     throw new Error("Manifest invalido. Campos exigidos: version e setupUrl.");
   }
+
+  writeUpdateLog("Update manifest validated.", {
+    version: manifest.version,
+    setupUrl: manifest.setupUrl,
+    hasSha256: typeof manifest.sha256 === "string"
+  });
 
   return {
     version: manifest.version,
@@ -611,6 +810,10 @@ async function fetchUpdateManifest() {
 
 async function downloadJsonInstaller(manifest) {
   sendUpdateProgress({ percent: 1, transferred: 0, total: 1 });
+  writeUpdateLog("Starting update package download.", {
+    targetVersion: manifest.version,
+    setupUrl: manifest.setupUrl
+  });
 
   const packageBuffer = await downloadBuffer(new URL(manifest.setupUrl), (progress) => {
     sendUpdateProgress({
@@ -619,9 +822,14 @@ async function downloadJsonInstaller(manifest) {
       total: progress.total
     });
   });
+  writeUpdateLog("Main update package downloaded.", {
+    targetVersion: manifest.version,
+    bytes: packageBuffer.length
+  });
 
   if (manifest.sha256) {
-    assertSha256(packageBuffer, manifest.sha256, "Assinatura SHA-256 diferente do manifest.");
+    const packageSha256 = assertSha256(packageBuffer, manifest.sha256, "Assinatura SHA-256 diferente do manifest.");
+    writeUpdateLog("Main update package SHA-256 validated.", { sha256: packageSha256 });
   }
 
   sendUpdateProgress({ percent: 65, transferred: 1, total: 1 });
@@ -648,6 +856,11 @@ async function downloadJsonInstaller(manifest) {
     const chunkUrl = new URL(chunkReference, manifest.setupUrl);
     const chunkStart = 60 + (index / Math.max(chunks.length, 1)) * 25;
     const chunkEnd = 60 + ((index + 1) / Math.max(chunks.length, 1)) * 25;
+    writeUpdateLog("Downloading update package chunk.", {
+      targetVersion: manifest.version,
+      part: index + 2,
+      url: chunkUrl.toString()
+    });
     const chunkBuffer = await downloadBuffer(chunkUrl, (progress) => {
       const chunkPercent = progress.percent > 0 ? progress.percent / 100 : 0;
       sendUpdateProgress({
@@ -656,9 +869,18 @@ async function downloadJsonInstaller(manifest) {
         total: progress.total
       });
     });
+    writeUpdateLog("Update package chunk downloaded.", {
+      targetVersion: manifest.version,
+      part: index + 2,
+      bytes: chunkBuffer.length
+    });
 
     if (chunk.sha256) {
-      assertSha256(chunkBuffer, chunk.sha256, `Assinatura SHA-256 da parte ${index + 2} diferente do pacote JSON.`);
+      const chunkSha256 = assertSha256(chunkBuffer, chunk.sha256, `Assinatura SHA-256 da parte ${index + 2} diferente do pacote JSON.`);
+      writeUpdateLog("Update package chunk SHA-256 validated.", {
+        part: index + 2,
+        sha256: chunkSha256
+      });
     }
 
     const chunkPackage = JSON.parse(chunkBuffer.toString("utf8"));
@@ -671,7 +893,12 @@ async function downloadJsonInstaller(manifest) {
 
   const installerBuffer = Buffer.concat(base64Parts.map((part) => Buffer.from(part, "base64")));
   if (updatePackage.sha256) {
-    assertSha256(installerBuffer, updatePackage.sha256, "Assinatura SHA-256 do instalador diferente do pacote JSON.");
+    const installerSha256 = assertSha256(installerBuffer, updatePackage.sha256, "Assinatura SHA-256 do instalador diferente do pacote JSON.");
+    writeUpdateLog("Rebuilt installer SHA-256 validated.", {
+      targetVersion: manifest.version,
+      sha256: installerSha256,
+      bytes: installerBuffer.length
+    });
   }
 
   const fileName = safeInstallerName(updatePackage.fileName || `Tempest Light Setup ${manifest.version}.exe`);
@@ -680,6 +907,11 @@ async function downloadJsonInstaller(manifest) {
 
   const targetPath = uniqueFilePath(path.join(targetDir, fileName.endsWith(".exe") ? fileName : `${fileName}.exe`));
   fs.writeFileSync(targetPath, installerBuffer);
+  writeUpdateLog("Installer prepared on disk.", {
+    targetVersion: manifest.version,
+    installerPath: targetPath,
+    bytes: installerBuffer.length
+  });
 
   sendUpdateProgress({ percent: 90, transferred: 1, total: 1 });
 
@@ -748,8 +980,9 @@ function downloadBuffer(url, onProgress, redirectCount = 0, extraHeaders = {}) {
 function assertSha256(buffer, expected, message) {
   const actual = crypto.createHash("sha256").update(buffer).digest("hex").toLowerCase();
   if (actual !== expected.trim().toLowerCase()) {
-    throw new Error(message);
+    throw new Error(`${message} Esperado: ${expected.trim().toLowerCase()}. Recebido: ${actual}.`);
   }
+  return actual;
 }
 
 function compareVersions(left, right) {
@@ -783,9 +1016,9 @@ function safeInstallerName(fileName) {
 
 function getInstallerDownloadDir() {
   try {
-    return app.getPath("downloads");
+    return getUpdateDataDir();
   } catch {
-    return path.join(os.homedir(), "Downloads");
+    return path.join(os.tmpdir(), "Tempest Light", "updates");
   }
 }
 
