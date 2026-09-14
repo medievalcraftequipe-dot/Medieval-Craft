@@ -1292,6 +1292,12 @@ button {
   background: var(--star-progress-gradient, linear-gradient(90deg, var(--accent), var(--amber)));
 }
 
+.server-like-card {
+  border-bottom: 1px solid var(--line);
+  margin: -8px 0 14px;
+  padding: 0 0 12px;
+}
+
 .star-support-page {
   display: grid;
   gap: 18px;
@@ -2439,6 +2445,12 @@ img.profile-avatar {
   font-size: 0.82rem;
 }
 
+.discover-card-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: stretch;
+}
+
 .discover-card button,
 .empty-actions button,
 .empty-sidebar button {
@@ -2453,6 +2465,28 @@ img.profile-avatar {
   cursor: pointer;
   padding: 0 12px;
   font-weight: 850;
+}
+
+.discover-card-actions .discover-like-button {
+  min-width: 88px;
+  border: 1px solid var(--line);
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.discover-card-actions .discover-like-button svg {
+  color: #ff6d8d;
+}
+
+.discover-card-actions .discover-like-button.active {
+  border-color: color-mix(in srgb, #ff6d8d, transparent 44%);
+  background: color-mix(in srgb, #ff6d8d, transparent 86%);
+  color: #ffb4c4;
+}
+
+.discover-card-actions .discover-like-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
 }
 
 .empty-state {
@@ -4064,8 +4098,10 @@ img.profile-avatar {
 }
 
 .profile-card-panel {
-  width: min(100%, 340px);
-  overflow: hidden;
+  width: min(100%, 380px);
+  max-height: min(92vh, 760px);
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #101722;
@@ -4208,6 +4244,181 @@ img.profile-card-avatar {
 
 .profile-star-balance strong {
   color: var(--text);
+}
+
+.profile-social-summary {
+  display: grid;
+}
+
+.profile-like-button,
+.server-like-button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.profile-like-button span,
+.server-like-button span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-like-button strong,
+.server-like-button strong {
+  color: var(--text);
+}
+
+.profile-like-button svg,
+.server-like-button svg,
+.profile-post-like svg {
+  color: #ff6d8d;
+}
+
+.profile-like-button.active,
+.server-like-button.active {
+  border-color: color-mix(in srgb, #ff6d8d, transparent 44%);
+  background: color-mix(in srgb, #ff6d8d, transparent 88%);
+}
+
+.profile-like-button:disabled,
+.server-like-button:disabled,
+.profile-post-composer button:disabled,
+.profile-post-like:disabled,
+.profile-post-delete:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
+
+.profile-card-notice {
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 58%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent), transparent 90%);
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  padding: 8px 10px;
+}
+
+.profile-post-composer {
+  display: grid;
+  gap: 8px;
+}
+
+.profile-post-composer textarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.4;
+  padding: 10px;
+}
+
+.profile-post-composer textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.profile-post-composer button {
+  display: inline-flex;
+  justify-self: end;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #06211b;
+  cursor: pointer;
+  padding: 0 12px;
+  font-weight: 900;
+}
+
+.profile-posts {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.profile-posts header,
+.profile-post footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.profile-posts header strong {
+  font-size: 0.88rem;
+}
+
+.profile-posts header span,
+.profile-post time,
+.profile-post-empty {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.profile-post {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface), transparent 8%);
+  padding: 10px;
+}
+
+.profile-post p,
+.profile-post-empty {
+  margin: 0;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.profile-post footer {
+  justify-content: flex-start;
+}
+
+.profile-post-like,
+.profile-post-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  border-radius: 7px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.profile-post-like.active {
+  background: color-mix(in srgb, #ff6d8d, transparent 84%);
+  color: #ffb4c4;
+}
+
+.profile-post-delete {
+  color: var(--danger);
 }
 
 .profile-card-public-dates {

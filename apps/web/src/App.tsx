@@ -82,11 +82,16 @@ import type {
   OnlineVoiceSignal,
   OnlineVoiceState,
   PresenceStatus,
+  ProfileFeedPost,
+  ProfilePostLikeResponse,
+  ProfileSocialResponse,
   PublishDesktopUpdateInput,
   PublishDesktopUpdateResponse,
   RegisterResponse,
+  ServerLikeSummaryResponse,
   TimeoutServerMemberInput,
-  UpdateProfileInput
+  UpdateProfileInput,
+  UserLikeSummaryResponse
 } from "@tempest-light/types";
 import { Button } from "@tempest-light/ui";
 
@@ -418,6 +423,8 @@ interface ServerDefinition {
   bannerColor: string;
   memberListVisible: boolean;
   isDiscoverable: boolean;
+  likeCount: number;
+  likedByMe: boolean;
   notificationsEnabled: boolean;
   communityEnabled: boolean;
   rulesChannelName: string | null;
@@ -665,6 +672,8 @@ interface DiscoveryServer {
   description: string;
   tags: string[];
   members: number;
+  likeCount: number;
+  likedByMe: boolean;
   purpose: ServerPurpose;
   templateId?: ServerTemplateId;
 }
@@ -764,6 +773,10 @@ interface ProfileCardUser {
   canMessage?: boolean;
   mutualFriends?: number;
   mutualServers?: number;
+  profileLikeCount?: number;
+  profileLikedByMe?: boolean;
+  profilePosts?: ProfileFeedPost[];
+  profileSocialLoaded?: boolean;
   voiceStatus?: {
     channelName: string;
     elapsedLabel: string;
@@ -2949,6 +2962,14 @@ function clampStarBalance(value: unknown) {
   return Math.min(maxUserStarBalance, Math.max(0, Math.floor(value)));
 }
 
+function clampPublicCounter(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor(value));
+}
+
 function getLocalProfileImagesKey(user: Pick<AuthUser, "id">) {
   return `${LOCAL_PROFILE_IMAGES_PREFIX}:${user.id}`;
 }
@@ -3619,6 +3640,8 @@ function normalizeSavedServer(server: Partial<ServerDefinition>, user: AuthUser)
     bannerColor: String(server.bannerColor || "#30343a"),
     memberListVisible: server.memberListVisible ?? true,
     isDiscoverable: server.isDiscoverable ?? false,
+    likeCount: clampPublicCounter(server.likeCount),
+    likedByMe: Boolean(server.likedByMe),
     notificationsEnabled: server.notificationsEnabled ?? true,
     communityEnabled: server.communityEnabled ?? false,
     rulesChannelName: server.rulesChannelName ?? null,
@@ -3662,6 +3685,21 @@ function normalizeSavedServer(server: Partial<ServerDefinition>, user: AuthUser)
     roles,
     members: membersWithBots
   };
+}
+
+function getServerConfigSnapshot(server: ServerDefinition) {
+  const { likeCount: _likeCount, likedByMe: _likedByMe, ...config } = server;
+  return {
+    ...config,
+    members: config.members.map((member) => {
+      const { starBalance: _starBalance, ...publicMember } = member;
+      return publicMember;
+    })
+  };
+}
+
+function getServerSyncHash(server: ServerDefinition) {
+  return JSON.stringify(getServerConfigSnapshot(server));
 }
 
 function formatMessageClock(value: string) {
@@ -4744,6 +4782,7 @@ function WorkspaceShell({
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileCardUser, setProfileCardUser] = useState<ProfileCardUser | null>(null);
+  const [profileCardNotice, setProfileCardNotice] = useState<string | null>(null);
   const [mentionInboxOpen, setMentionInboxOpen] = useState(false);
   const [mentionNotifications, setMentionNotifications] = useState<MentionNotification[]>(() => readMentionNotifications(user));
   const [serverGuideOpen, setServerGuideOpen] = useState(false);
@@ -5185,6 +5224,8 @@ function WorkspaceShell({
         description: "Servidor criado no Tempest Light e aberto no Descubra.",
         tags: [server.purpose === "community" ? "comunidade" : "amigos", "tempest"],
         members: server.members.length,
+        likeCount: server.likeCount,
+        likedByMe: server.likedByMe,
         purpose: server.purpose
       }));
     const onlineServers: DiscoveryServer[] = onlineDiscoverServers
@@ -5196,6 +5237,8 @@ function WorkspaceShell({
         description: server.description,
         tags: [server.purpose === "community" ? "comunidade" : "amigos", "online"],
         members: server.members.length,
+        likeCount: server.likeCount,
+        likedByMe: server.likedByMe,
         purpose: server.purpose,
         templateId: server.templateId
       }));
@@ -5321,7 +5364,7 @@ function WorkspaceShell({
         }
 
         const normalizedServers = serverBundle.servers.map((server) => normalizeSavedServer(server as Partial<ServerDefinition>, user));
-        serverSyncHashesRef.current = Object.fromEntries(normalizedServers.map((server) => [server.id, JSON.stringify(server)]));
+        serverSyncHashesRef.current = Object.fromEntries(normalizedServers.map((server) => [server.id, getServerSyncHash(server)]));
         serverSyncLoadedRef.current = true;
         setServers(normalizedServers);
         setMessages(serverBundle.messages.map((message) => onlineServerMessageToLocalMessage(message)));
@@ -5371,6 +5414,51 @@ function WorkspaceShell({
       cancelled = true;
     };
   }, [activeView, api, onlineMode, user]);
+
+  useEffect(() => {
+    if (!profileCardUser) {
+      setProfileCardNotice(null);
+      return undefined;
+    }
+
+    if (!onlineMode || !api) {
+      setProfileCardUser((current) =>
+        current && current.id === profileCardUser.id
+          ? {
+              ...current,
+              profileLikeCount: current.profileLikeCount ?? 0,
+              profileLikedByMe: current.profileLikedByMe ?? false,
+              profilePosts: current.profilePosts ?? [],
+              profileSocialLoaded: true
+            }
+          : current
+      );
+      return undefined;
+    }
+
+    let cancelled = false;
+    const profileUserId = profileCardUser.id;
+    const onlineApi = api;
+    async function loadProfileSocial() {
+      try {
+        const result = await onlineApi.getProfileSocial(profileUserId);
+        if (!cancelled) {
+          applyProfileSocial(result);
+          setProfileCardNotice(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setProfileCardNotice("Nao consegui carregar publicacoes e curtidas desse perfil agora.");
+        }
+      }
+    }
+
+    setProfileCardUser((current) => (current && current.id === profileUserId ? { ...current, profileSocialLoaded: false } : current));
+    void loadProfileSocial();
+    return () => {
+      cancelled = true;
+    };
+  }, [api, onlineMode, profileCardUser?.id]);
 
   useEffect(() => {
     if (!window.tempestLightDesktop?.onDeepLink) {
@@ -5687,7 +5775,7 @@ function WorkspaceShell({
 
     serverSyncTimeoutRef.current = window.setTimeout(() => {
       servers.forEach((server) => {
-        const currentHash = JSON.stringify(server);
+        const currentHash = getServerSyncHash(server);
         if (serverSyncHashesRef.current[server.id] === currentHash) {
           return;
         }
@@ -5705,7 +5793,7 @@ function WorkspaceShell({
 
         serverSyncHashesRef.current[server.id] = currentHash;
         void api
-          .updateServerState(server.id, { server })
+          .updateServerState(server.id, { server: getServerConfigSnapshot(server) })
           .then((result) => applyOnlineServer(result.server, { expectedLocalHash: currentHash }))
           .then(() => setOnlineSyncStatus("idle"))
           .catch(() => {
@@ -5882,7 +5970,7 @@ function WorkspaceShell({
   }
 
   function rememberServerSync(server: ServerDefinition) {
-    serverSyncHashesRef.current[server.id] = JSON.stringify(server);
+    serverSyncHashesRef.current[server.id] = getServerSyncHash(server);
   }
 
   function normalizeOnlineServer(rawServer: unknown) {
@@ -5895,7 +5983,7 @@ function WorkspaceShell({
   ): ServerDefinition {
     const server = normalizeOnlineServer(rawServer);
     const currentServer = serversRef.current.find((item) => item.id === server.id) ?? null;
-    const currentHash = currentServer ? JSON.stringify(currentServer) : null;
+    const currentHash = currentServer ? getServerSyncHash(currentServer) : null;
 
     if (options.expectedLocalHash && currentHash !== options.expectedLocalHash) {
       return currentServer ?? server;
@@ -5911,6 +5999,233 @@ function WorkspaceShell({
       return exists ? current.map((item) => (item.id === server.id ? server : item)) : [...current, server];
     });
     return server;
+  }
+
+  function applyServerLikeSummary(summary: ServerLikeSummaryResponse) {
+    const likeCount = clampPublicCounter(summary.likeCount);
+    const likedByMe = Boolean(summary.likedByMe);
+    setServers((current) =>
+      current.map((server) =>
+        server.id === summary.serverId
+          ? {
+              ...server,
+              likeCount,
+              likedByMe
+            }
+          : server
+      )
+    );
+    setOnlineDiscoverServers((current) =>
+      current.map((server) =>
+        server.id === summary.serverId
+          ? {
+              ...server,
+              likeCount,
+              likedByMe
+            }
+          : server
+      )
+    );
+  }
+
+  async function toggleServerLike(target: Pick<DiscoveryServer, "id" | "onlineServerId" | "likeCount" | "likedByMe"> | ServerDefinition) {
+    const serverId = "onlineServerId" in target && target.onlineServerId ? target.onlineServerId : target.id.replace(/^created-/, "").replace(/^online-/, "");
+    const previousState: ServerLikeSummaryResponse = {
+      serverId,
+      likeCount: clampPublicCounter(target.likeCount),
+      likedByMe: Boolean(target.likedByMe)
+    };
+    const optimisticState: ServerLikeSummaryResponse = {
+      serverId,
+      likeCount: Math.max(0, previousState.likeCount + (previousState.likedByMe ? -1 : 1)),
+      likedByMe: !previousState.likedByMe
+    };
+
+    if (!onlineMode || !api) {
+      setServerNotice("A API online precisa estar conectada para curtir comunidades.");
+      return;
+    }
+
+    applyServerLikeSummary(optimisticState);
+    try {
+      const result = previousState.likedByMe ? await api.unlikeServer(serverId) : await api.likeServer(serverId);
+      applyServerLikeSummary(result);
+      setOnlineSyncStatus("idle");
+    } catch (error) {
+      applyServerLikeSummary(previousState);
+      setServerNotice(error instanceof ApiError ? error.message : "Nao consegui atualizar essa curtida agora.");
+      setOnlineSyncStatus("error");
+    }
+  }
+
+  function applyProfileSocial(summary: ProfileSocialResponse) {
+    setProfileCardUser((current) =>
+      current && current.id === summary.profile.id
+        ? {
+            ...current,
+            username: summary.profile.username,
+            displayName: summary.profile.displayName,
+            avatarUrl: summary.profile.avatarUrl,
+            bannerUrl: summary.profile.bannerUrl,
+            bio: summary.profile.bio,
+            customStatus: summary.profile.customStatus,
+            presence: getPublicPresence(summary.profile.presence),
+            starBalance: current.id === user.id ? clampStarBalance(user.starBalance) : 0,
+            profileLikeCount: clampPublicCounter(summary.likeCount),
+            profileLikedByMe: Boolean(summary.likedByMe),
+            profilePosts: summary.posts,
+            profileSocialLoaded: true
+          }
+        : current
+    );
+  }
+
+  function applyProfileLikeSummary(summary: UserLikeSummaryResponse) {
+    setProfileCardUser((current) =>
+      current && current.id === summary.userId
+        ? {
+            ...current,
+            profileLikeCount: clampPublicCounter(summary.likeCount),
+            profileLikedByMe: Boolean(summary.likedByMe),
+            profileSocialLoaded: true
+          }
+        : current
+    );
+  }
+
+  function applyProfilePostLikeSummary(summary: ProfilePostLikeResponse) {
+    setProfileCardUser((current) =>
+      current
+        ? {
+            ...current,
+            profilePosts: (current.profilePosts ?? []).map((post) =>
+              post.id === summary.postId
+                ? {
+                    ...post,
+                    likeCount: clampPublicCounter(summary.likeCount),
+                    likedByMe: Boolean(summary.likedByMe)
+                  }
+                : post
+            )
+          }
+        : current
+    );
+  }
+
+  async function createProfileCardPost(content: string) {
+    if (!onlineMode || !api) {
+      setProfileCardNotice("A API online precisa estar conectada para publicar no perfil.");
+      return false;
+    }
+
+    if (!profileCardUser?.isOwnProfile) {
+      setProfileCardNotice("Voce so pode publicar dentro do seu proprio perfil.");
+      return false;
+    }
+
+    try {
+      const result = await api.createProfilePost({ content });
+      setProfileCardUser((current) =>
+        current && current.id === result.post.authorId
+          ? {
+              ...current,
+              profilePosts: [result.post, ...(current.profilePosts ?? [])],
+              profileSocialLoaded: true
+            }
+          : current
+      );
+      setProfileCardNotice(null);
+      return true;
+    } catch (error) {
+      setProfileCardNotice(error instanceof ApiError ? error.message : "Nao consegui publicar no perfil agora.");
+      return false;
+    }
+  }
+
+  async function deleteProfileCardPost(postId: string) {
+    if (!onlineMode || !api) {
+      setProfileCardNotice("A API online precisa estar conectada para excluir publicacoes.");
+      return;
+    }
+
+    if (!window.confirm("Excluir esta publicacao do perfil?")) {
+      return;
+    }
+
+    try {
+      await api.deleteProfilePost(postId);
+      setProfileCardUser((current) =>
+        current
+          ? {
+              ...current,
+              profilePosts: (current.profilePosts ?? []).filter((post) => post.id !== postId)
+            }
+          : current
+      );
+      setProfileCardNotice(null);
+    } catch (error) {
+      setProfileCardNotice(error instanceof ApiError ? error.message : "Nao consegui excluir essa publicacao agora.");
+    }
+  }
+
+  async function toggleProfileCardLike() {
+    if (!profileCardUser) {
+      return;
+    }
+
+    if (!onlineMode || !api) {
+      setProfileCardNotice("A API online precisa estar conectada para curtir perfis.");
+      return;
+    }
+
+    const previousState: UserLikeSummaryResponse = {
+      userId: profileCardUser.id,
+      likeCount: clampPublicCounter(profileCardUser.profileLikeCount),
+      likedByMe: Boolean(profileCardUser.profileLikedByMe)
+    };
+    const optimisticState: UserLikeSummaryResponse = {
+      userId: previousState.userId,
+      likeCount: Math.max(0, previousState.likeCount + (previousState.likedByMe ? -1 : 1)),
+      likedByMe: !previousState.likedByMe
+    };
+
+    applyProfileLikeSummary(optimisticState);
+    try {
+      const result = previousState.likedByMe ? await api.unlikeProfile(previousState.userId) : await api.likeProfile(previousState.userId);
+      applyProfileLikeSummary(result);
+      setProfileCardNotice(null);
+    } catch (error) {
+      applyProfileLikeSummary(previousState);
+      setProfileCardNotice(error instanceof ApiError ? error.message : "Nao consegui atualizar a curtida desse perfil agora.");
+    }
+  }
+
+  async function toggleProfileCardPostLike(post: ProfileFeedPost) {
+    if (!onlineMode || !api) {
+      setProfileCardNotice("A API online precisa estar conectada para curtir publicacoes.");
+      return;
+    }
+
+    const previousState: ProfilePostLikeResponse = {
+      postId: post.id,
+      likeCount: clampPublicCounter(post.likeCount),
+      likedByMe: Boolean(post.likedByMe)
+    };
+    const optimisticState: ProfilePostLikeResponse = {
+      postId: post.id,
+      likeCount: Math.max(0, previousState.likeCount + (previousState.likedByMe ? -1 : 1)),
+      likedByMe: !previousState.likedByMe
+    };
+
+    applyProfilePostLikeSummary(optimisticState);
+    try {
+      const result = previousState.likedByMe ? await api.unlikeProfilePost(post.id) : await api.likeProfilePost(post.id);
+      applyProfilePostLikeSummary(result);
+      setProfileCardNotice(null);
+    } catch (error) {
+      applyProfilePostLikeSummary(previousState);
+      setProfileCardNotice(error instanceof ApiError ? error.message : "Nao consegui atualizar a curtida dessa publicacao agora.");
+    }
   }
 
   function removeServerFromWorkspace(serverId: string, notice: string) {
@@ -7211,6 +7526,8 @@ function WorkspaceShell({
       bannerColor: template.bannerColor,
       memberListVisible: true,
       isDiscoverable: template.isDiscoverable,
+      likeCount: 0,
+      likedByMe: false,
       notificationsEnabled: true,
       communityEnabled: template.communityEnabled,
       rulesChannelName: template.rulesChannelName,
@@ -8506,7 +8823,7 @@ function WorkspaceShell({
         bio: profileCardUser.id === user.id ? user.bio : profileCardUser.bio,
         customStatus: profileCardUser.id === user.id ? user.customStatus : profileCardUser.customStatus,
         presence: profileCardUser.id === user.id ? user.presence : profileCardUser.presence,
-        starBalance: profileCardUser.id === user.id ? clampStarBalance(user.starBalance) : clampStarBalance(profileCardUser.starBalance),
+        starBalance: profileCardUser.id === user.id ? clampStarBalance(user.starBalance) : 0,
         accountCreatedAt: profileCardUser.id === user.id ? user.createdAt : profileCardUser.accountCreatedAt,
         serverRoleIds: liveProfileServerMember?.roleIds ?? profileCardUser.serverRoleIds,
         voiceStatus: profileCardUser.id === user.id ? ownVoiceStatus : profileCardUser.voiceStatus,
@@ -9023,6 +9340,19 @@ function WorkspaceShell({
                   />
                 </section>
               ) : null}
+              <section className="server-like-card" aria-label="Curtidas da comunidade">
+                <button
+                  className={activeServer.likedByMe ? "server-like-button active" : "server-like-button"}
+                  type="button"
+                  title="Curtir comunidade"
+                  onClick={() => void toggleServerLike(activeServer)}
+                  disabled={!onlineMode}
+                >
+                  <Heart size={15} fill={activeServer.likedByMe ? "currentColor" : "none"} />
+                  <span>Curtidas da comunidade</span>
+                  <strong>{clampPublicCounter(activeServer.likeCount).toLocaleString("pt-BR")}</strong>
+                </button>
+              </section>
               <section className="server-quick-links" aria-label="Atalhos do servidor">
                 {canUseActiveServerGuide ? (
                   <button className={serverGuideOpen ? "active" : ""} type="button" onClick={openServerGuide}>
@@ -9716,12 +10046,26 @@ function WorkspaceShell({
                   <div>
                     <strong>{server.name}</strong>
                     <p>{server.description}</p>
-                    <span>{server.members} membros - {server.tags.join(", ")}</span>
+                    <span>
+                      {server.members} membros - {server.tags.join(", ")}
+                    </span>
                   </div>
-                  <button type="button" onClick={() => joinDiscoveredServer(server)}>
-                    Entrar
-                    <ChevronRight size={17} />
-                  </button>
+                  <div className="discover-card-actions">
+                    <button
+                      className={server.likedByMe ? "discover-like-button active" : "discover-like-button"}
+                      type="button"
+                      title="Curtir comunidade"
+                      onClick={() => void toggleServerLike(server)}
+                      disabled={!onlineMode}
+                    >
+                      <Heart size={15} fill={server.likedByMe ? "currentColor" : "none"} />
+                      {clampPublicCounter(server.likeCount).toLocaleString("pt-BR")}
+                    </button>
+                    <button type="button" onClick={() => joinDiscoveredServer(server)}>
+                      Entrar
+                      <ChevronRight size={17} />
+                    </button>
+                  </div>
                 </article>
               ))}
               {!discoverResults.length ? (
@@ -10063,6 +10407,8 @@ function WorkspaceShell({
       {liveProfileCardUser ? (
         <ProfileCardDialog
           profile={liveProfileCardUser}
+          notice={profileCardNotice}
+          socialAvailable={onlineMode}
           onClose={() => setProfileCardUser(null)}
           onEdit={() => {
             setProfileCardUser(null);
@@ -10085,6 +10431,10 @@ function WorkspaceShell({
               setMemberRole(activeServer.id, memberId, roleId, enabled);
             }
           }}
+          onToggleProfileLike={toggleProfileCardLike}
+          onCreatePost={createProfileCardPost}
+          onDeletePost={deleteProfileCardPost}
+          onTogglePostLike={toggleProfileCardPostLike}
           linkedAccounts={linkedAccounts}
           canUseAccountSwitcher={canUseAccountSwitcher}
           onSwitchAccount={onSwitchLinkedAccount}
@@ -10716,6 +11066,8 @@ function createServerFromDiscordTemplate(template: DiscordTemplatePayload, user:
     bannerColor: pickDiscordBannerColor(guild),
     memberListVisible: true,
     isDiscoverable: false,
+    likeCount: 0,
+    likedByMe: false,
     notificationsEnabled: true,
     communityEnabled,
     rulesChannelName: channelImport.rulesChannelName,
@@ -11692,24 +12044,36 @@ function formatPublicAge(value?: string | null) {
 
 function ProfileCardDialog({
   profile,
+  notice,
+  socialAvailable,
   onClose,
   onEdit,
   onMessage,
   serverRoles = [],
   canManageServerRoles = false,
   onToggleServerRole,
+  onToggleProfileLike,
+  onCreatePost,
+  onDeletePost,
+  onTogglePostLike,
   linkedAccounts = [],
   canUseAccountSwitcher = false,
   onSwitchAccount,
   onRemoveLinkedAccount
 }: {
   profile: ProfileCardUser;
+  notice?: string | null;
+  socialAvailable: boolean;
   onClose: () => void;
   onEdit: () => void;
   onMessage: () => void;
   serverRoles?: ServerRole[];
   canManageServerRoles?: boolean;
   onToggleServerRole?: (memberId: string, roleId: string, enabled: boolean) => void;
+  onToggleProfileLike: () => Promise<void>;
+  onCreatePost: (content: string) => Promise<boolean>;
+  onDeletePost: (postId: string) => Promise<void>;
+  onTogglePostLike: (post: ProfileFeedPost) => Promise<void>;
   linkedAccounts?: AuthUser[];
   canUseAccountSwitcher?: boolean;
   onSwitchAccount?: (accountId: string) => void;
@@ -11722,9 +12086,13 @@ function ProfileCardDialog({
   const [accountMenuId, setAccountMenuId] = useState<string | null>(null);
   const [accountSwitcherNotice, setAccountSwitcherNotice] = useState<string | null>(null);
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
+  const [postDraft, setPostDraft] = useState("");
+  const [posting, setPosting] = useState(false);
   const assignableRoles = serverRoles.filter((role) => !role.isDefault);
   const profileServerRoleIds = new Set(profile.serverRoleIds ?? []);
   const showRoleManager = canManageServerRoles && Boolean(profile.serverJoinedAt) && Boolean(onToggleServerRole) && assignableRoles.length > 0;
+  const profilePosts = profile.profilePosts ?? [];
+  const profileLikeCount = clampPublicCounter(profile.profileLikeCount);
   const availableAccounts = linkedAccounts.length
     ? linkedAccounts
     : profile.isOwnProfile
@@ -11747,6 +12115,26 @@ function ProfileCardDialog({
         }
       ]
     : [];
+
+  useEffect(() => {
+    setPostDraft("");
+    setPosting(false);
+  }, [profile.id]);
+
+  async function submitProfilePost(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const content = postDraft.trim();
+    if (!content || posting) {
+      return;
+    }
+
+    setPosting(true);
+    const created = await onCreatePost(content);
+    if (created) {
+      setPostDraft("");
+    }
+    setPosting(false);
+  }
 
   function switchToAccount(accountId: string) {
     if (accountId === profile.id || !onSwitchAccount) {
@@ -11823,11 +12211,87 @@ function ProfileCardDialog({
 
           {profile.bio ? <p className="profile-card-bio">{profile.bio}</p> : null}
 
-          <div className="profile-star-balance">
-            <Sparkles size={15} />
-            <span>Saldo de estrelas atuais</span>
-            <strong>{clampStarBalance(profile.starBalance).toLocaleString("pt-BR")}</strong>
+          {profile.isOwnProfile ? (
+            <div className="profile-star-balance">
+              <Sparkles size={15} />
+              <span>Saldo de estrelas atuais</span>
+              <strong>{clampStarBalance(profile.starBalance).toLocaleString("pt-BR")}</strong>
+            </div>
+          ) : null}
+
+          <div className="profile-social-summary">
+            <button
+              className={profile.profileLikedByMe ? "profile-like-button active" : "profile-like-button"}
+              type="button"
+              title="Curtir perfil"
+              onClick={() => void onToggleProfileLike()}
+              disabled={!socialAvailable || profile.profileSocialLoaded === false}
+            >
+              <Heart size={16} fill={profile.profileLikedByMe ? "currentColor" : "none"} />
+              <span>Curtidas do perfil</span>
+              <strong>{profileLikeCount.toLocaleString("pt-BR")}</strong>
+            </button>
           </div>
+
+          {notice ? <div className="profile-card-notice">{notice}</div> : null}
+
+          {profile.isOwnProfile ? (
+            <form className="profile-post-composer" onSubmit={submitProfilePost}>
+              <textarea
+                value={postDraft}
+                onChange={(event) => setPostDraft(event.target.value.slice(0, 500))}
+                placeholder="Publicar no seu perfil"
+                rows={3}
+                disabled={!socialAvailable || posting}
+              />
+              <button type="submit" disabled={!socialAvailable || posting || !postDraft.trim()}>
+                <Send size={15} />
+                Publicar
+              </button>
+            </form>
+          ) : null}
+
+          <section className="profile-posts" aria-label="Publicacoes do perfil">
+            <header>
+              <strong>Publicacoes</strong>
+              {profile.profileSocialLoaded === false ? <span>Carregando</span> : null}
+            </header>
+            {profilePosts.length ? (
+              profilePosts.map((post) => (
+                <article className="profile-post" key={post.id}>
+                  <p>{post.content}</p>
+                  <footer>
+                    <time dateTime={post.createdAt}>
+                      {formatPublicDate(post.createdAt) ?? formatMessageClock(post.createdAt)}
+                    </time>
+                    <button
+                      className={post.likedByMe ? "profile-post-like active" : "profile-post-like"}
+                      type="button"
+                      title="Curtir publicacao"
+                      onClick={() => void onTogglePostLike(post)}
+                      disabled={!socialAvailable}
+                    >
+                      <Heart size={14} fill={post.likedByMe ? "currentColor" : "none"} />
+                      {clampPublicCounter(post.likeCount).toLocaleString("pt-BR")}
+                    </button>
+                    {profile.isOwnProfile ? (
+                      <button
+                        className="profile-post-delete"
+                        type="button"
+                        title="Excluir publicacao"
+                        onClick={() => void onDeletePost(post.id)}
+                        disabled={!socialAvailable}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    ) : null}
+                  </footer>
+                </article>
+              ))
+            ) : profile.profileSocialLoaded === false ? null : (
+              <p className="profile-post-empty">Nenhuma publicacao ainda.</p>
+            )}
+          </section>
 
           {accountCreatedDate || serverJoinedDate ? (
             <div className="profile-card-public-dates">

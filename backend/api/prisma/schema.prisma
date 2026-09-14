@@ -104,8 +104,13 @@ model User {
   ownedBots               Bot[]                @relation("BotOwner")
   ownedServers            Server[]             @relation("OwnedServers")
   passwordResetCodes      PasswordResetCode[]
+  profileLikesGiven       UserProfileLike[]     @relation("UserProfileLikesGiven")
+  profileLikesReceived    UserProfileLike[]     @relation("UserProfileLikesReceived")
+  profilePostLikes        ProfilePostLike[]
+  profilePosts            ProfilePost[]         @relation("ProfilePostAuthor")
   reactions               Reaction[]
   receivedFriendRequests  FriendRequest[]      @relation("FriendRequestReceiver")
+  serverLikes             ServerLike[]
   serverChannelMessages   ServerChannelMessage[]
   serverVoiceSessions     ServerVoiceSession[]
   sentFriendRequests      FriendRequest[]      @relation("FriendRequestSender")
@@ -216,6 +221,7 @@ model Server {
   channels            Channel[]
   emojis              CustomEmoji[]
   invites             Invite[]
+  likes               ServerLike[]
   members             ServerMember[]
   moderationActions   ModerationAction[]
   owner               User                 @relation("OwnedServers", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -227,6 +233,53 @@ model Server {
   stickers            Sticker[]
 
   @@index([ownerId])
+}
+
+model ProfilePost {
+  id        String            @id @default(cuid())
+  authorId  String
+  content   String
+  deletedAt DateTime?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  author    User              @relation("ProfilePostAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  likes     ProfilePostLike[]
+
+  @@index([authorId, createdAt])
+  @@index([deletedAt])
+}
+
+model ProfilePostLike {
+  postId    String
+  userId    String
+  createdAt DateTime    @default(now())
+  post      ProfilePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@index([userId])
+}
+
+model UserProfileLike {
+  targetUserId String
+  userId       String
+  createdAt    DateTime @default(now())
+  targetUser   User     @relation("UserProfileLikesReceived", fields: [targetUserId], references: [id], onDelete: Cascade)
+  user         User     @relation("UserProfileLikesGiven", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([targetUserId, userId])
+  @@index([userId])
+}
+
+model ServerLike {
+  serverId  String
+  userId    String
+  createdAt DateTime @default(now())
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([serverId, userId])
+  @@index([userId])
 }
 
 model ServerMember {

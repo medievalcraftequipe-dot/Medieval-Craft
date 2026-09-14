@@ -26,8 +26,8 @@ export class ServersController {
   }
 
   @Get("discover")
-  listDiscoverableServers() {
-    return this.servers.listDiscoverableServers();
+  listDiscoverableServers(@Req() request: AuthenticatedRequest) {
+    return this.servers.listDiscoverableServers(request.user.id);
   }
 
   @Get(":serverId")
@@ -63,6 +63,21 @@ export class ServersController {
   @Delete(":serverId")
   deleteServer(@Param("serverId") serverId: string, @Body() dto: DeleteServerDto, @Req() request: AuthenticatedRequest) {
     return this.servers.deleteServer(request.user.id, serverId, dto.currentPassword);
+  }
+
+  @Get(":serverId/likes")
+  getServerLikes(@Param("serverId") serverId: string, @Req() request: AuthenticatedRequest) {
+    return this.servers.getServerLikes(request.user.id, serverId);
+  }
+
+  @Post(":serverId/likes")
+  likeServer(@Param("serverId") serverId: string, @Req() request: AuthenticatedRequest) {
+    return this.servers.likeServer(request.user.id, serverId);
+  }
+
+  @Delete(":serverId/likes")
+  unlikeServer(@Param("serverId") serverId: string, @Req() request: AuthenticatedRequest) {
+    return this.servers.unlikeServer(request.user.id, serverId);
   }
 
   @Post(":serverId/stars")

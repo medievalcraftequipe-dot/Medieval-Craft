@@ -1,6 +1,12 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import type { FriendRequest, Message, User } from "@prisma/client";
+import type { FriendRequest, Message, ProfilePost, User } from "@prisma/client";
 import { PrismaService } from "../../common/prisma/prisma.service";
+
+type ProfilePostWithSocial = ProfilePost & {
+  author: User;
+  likes?: Array<{ userId: string }>;
+  _count?: { likes: number };
+};
 
 @Injectable()
 export class SocialService {
@@ -230,6 +236,139 @@ export class SocialService {
     return { ok: true, status: "CANCELED" as const, request: this.presentFriendRequest(userId, request) };
   }
 
+  async getProfileSocial(viewerId: string, profileUserId: string) {
+    const profile = await this.prisma.user.findUnique({
+      where: { id: profileUserId }
+    });
+
+    if (!profile) {
+      throw new NotFoundException("Usuario nao encontrado.");
+    }
+
+    const [likeCount, likedByMe, posts] = await Promise.all([
+      this.prisma.userProfileLike.count({ where: { targetUserId: profileUserId } }),
+      this.prisma.userProfileLike.findUnique({
+        where: {
+          targetUserId_userId: {
+            targetUserId: profileUserId,
+            userId: viewerId
+          }
+        },
+        select: { userId: true }
+      }),
+      this.prisma.profilePost.findMany({
+        where: { authorId: profileUserId, deletedAt: null },
+        include: this.getProfilePostInclude(viewerId),
+        orderBy: { createdAt: "desc" },
+        take: 30
+      })
+    ]);
+
+    return {
+      profile: this.presentPublicUser(profile),
+      likeCount,
+      likedByMe: Boolean(likedByMe),
+      posts: posts.map((post) => this.presentProfilePost(post, viewerId))
+    };
+  }
+
+  async createProfilePost(userId: string, contentInput: string) {
+    const content = this.cleanProfilePostContent(contentInput);
+    const post = await this.prisma.profilePost.create({
+      data: {
+        authorId: userId,
+        content
+      },
+      include: this.getProfilePostInclude(userId)
+    });
+
+    return { post: this.presentProfilePost(post, userId) };
+  }
+
+  async deleteProfilePost(userId: string, postId: string) {
+    const post = await this.prisma.profilePost.findUnique({
+      where: { id: postId },
+      select: { id: true, authorId: true, deletedAt: true }
+    });
+
+    if (!post || post.deletedAt) {
+      throw new NotFoundException("Publicacao nao encontrada.");
+    }
+
+    if (post.authorId !== userId) {
+      throw new ForbiddenException("Voce so pode excluir publicacoes do seu perfil.");
+    }
+
+    await this.prisma.profilePost.update({
+      where: { id: postId },
+      data: { deletedAt: new Date() }
+    });
+
+    return { ok: true as const, postId };
+  }
+
+  async likeProfile(userId: string, targetUserId: string) {
+    await this.ensureUserExists(targetUserId);
+    await this.prisma.userProfileLike.upsert({
+      where: {
+        targetUserId_userId: {
+          targetUserId,
+          userId
+        }
+      },
+      update: {},
+      create: {
+        targetUserId,
+        userId
+      }
+    });
+
+    return this.getUserProfileLikeSummary(userId, targetUserId);
+  }
+
+  async unlikeProfile(userId: string, targetUserId: string) {
+    await this.ensureUserExists(targetUserId);
+    await this.prisma.userProfileLike.deleteMany({
+      where: {
+        targetUserId,
+        userId
+      }
+    });
+
+    return this.getUserProfileLikeSummary(userId, targetUserId);
+  }
+
+  async likeProfilePost(userId: string, postId: string) {
+    await this.ensureProfilePostExists(postId);
+    await this.prisma.profilePostLike.upsert({
+      where: {
+        postId_userId: {
+          postId,
+          userId
+        }
+      },
+      update: {},
+      create: {
+        postId,
+        userId
+      }
+    });
+
+    return this.getProfilePostLikeSummary(userId, postId);
+  }
+
+  async unlikeProfilePost(userId: string, postId: string) {
+    await this.ensureProfilePostExists(postId);
+    await this.prisma.profilePostLike.deleteMany({
+      where: {
+        postId,
+        userId
+      }
+    });
+
+    return this.getProfilePostLikeSummary(userId, postId);
+  }
+
   private async findUserByUsername(username: string) {
     const user = await this.prisma.user.findUnique({
       where: { username }
@@ -240,6 +379,41 @@ export class SocialService {
     }
 
     return user;
+  }
+
+  private async ensureUserExists(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true }
+    });
+
+    if (!user) {
+      throw new NotFoundException("Usuario nao encontrado.");
+    }
+  }
+
+  private async ensureProfilePostExists(postId: string) {
+    const post = await this.prisma.profilePost.findUnique({
+      where: { id: postId },
+      select: { id: true, deletedAt: true }
+    });
+
+    if (!post || post.deletedAt) {
+      throw new NotFoundException("Publicacao nao encontrada.");
+    }
+  }
+
+  private cleanProfilePostContent(contentInput: string) {
+    const content = String(contentInput ?? "").trim();
+    if (!content) {
+      throw new BadRequestException("Escreva algo para publicar no perfil.");
+    }
+
+    if (content.length > 500) {
+      throw new BadRequestException("A publicacao pode ter ate 500 caracteres.");
+    }
+
+    return content;
   }
 
   private ensureDifferentUsers(userId: string, targetId: string) {
@@ -346,9 +520,70 @@ export class SocialService {
       bio: user.bio,
       customStatus: user.customStatus,
       presence: this.presentPublicPresence(user.presence),
-      blockNonFriendDirectMessages: user.blockNonFriendDirectMessages,
-      starBalance: user.starBalance
+      blockNonFriendDirectMessages: user.blockNonFriendDirectMessages
     };
+  }
+
+  private getProfilePostInclude(viewerId: string) {
+    return {
+      author: true,
+      likes: {
+        where: { userId: viewerId },
+        select: { userId: true }
+      },
+      _count: {
+        select: { likes: true }
+      }
+    };
+  }
+
+  private presentProfilePost(post: ProfilePostWithSocial, viewerId: string) {
+    return {
+      id: post.id,
+      authorId: post.authorId,
+      authorUsername: post.author.username,
+      authorDisplayName: post.author.displayName,
+      authorAvatarUrl: post.author.avatarUrl,
+      content: post.content,
+      likeCount: post._count?.likes ?? 0,
+      likedByMe: Boolean(post.likes?.some((like) => like.userId === viewerId)),
+      createdAt: post.createdAt.toISOString(),
+      updatedAt: post.updatedAt.toISOString()
+    };
+  }
+
+  private async getUserProfileLikeSummary(userId: string, targetUserId: string) {
+    const [likeCount, likedByMe] = await Promise.all([
+      this.prisma.userProfileLike.count({ where: { targetUserId } }),
+      this.prisma.userProfileLike.findUnique({
+        where: {
+          targetUserId_userId: {
+            targetUserId,
+            userId
+          }
+        },
+        select: { userId: true }
+      })
+    ]);
+
+    return { userId: targetUserId, likeCount, likedByMe: Boolean(likedByMe) };
+  }
+
+  private async getProfilePostLikeSummary(userId: string, postId: string) {
+    const [likeCount, likedByMe] = await Promise.all([
+      this.prisma.profilePostLike.count({ where: { postId } }),
+      this.prisma.profilePostLike.findUnique({
+        where: {
+          postId_userId: {
+            postId,
+            userId
+          }
+        },
+        select: { userId: true }
+      })
+    ]);
+
+    return { postId, likeCount, likedByMe: Boolean(likedByMe) };
   }
 
   private presentPublicPresence(presence: User["presence"]) {

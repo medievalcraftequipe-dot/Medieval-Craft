@@ -164,7 +164,53 @@ export interface PublicUser {
   customStatus: string | null;
   presence: PresenceStatus;
   blockNonFriendDirectMessages: boolean;
-  starBalance: number;
+  starBalance?: number;
+}
+
+export interface CreateProfilePostInput {
+  content: string;
+}
+
+export interface ProfileFeedPost {
+  id: string;
+  authorId: string;
+  authorUsername: string;
+  authorDisplayName: string;
+  authorAvatarUrl: string | null;
+  content: string;
+  likeCount: number;
+  likedByMe: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProfileSocialResponse {
+  profile: PublicUser;
+  likeCount: number;
+  likedByMe: boolean;
+  posts: ProfileFeedPost[];
+}
+
+export interface ProfilePostResponse {
+  post: ProfileFeedPost;
+}
+
+export interface UserLikeSummaryResponse {
+  userId: string;
+  likeCount: number;
+  likedByMe: boolean;
+}
+
+export interface ProfilePostLikeResponse {
+  postId: string;
+  likeCount: number;
+  likedByMe: boolean;
+}
+
+export interface ServerLikeSummaryResponse {
+  serverId: string;
+  likeCount: number;
+  likedByMe: boolean;
 }
 
 export interface DirectMessage {

@@ -22,6 +22,7 @@ import type {
   FriendRequestsResponse,
   HealthResponse,
   CreateOnlineServerInput,
+  CreateProfilePostInput,
   CreateServerInviteInput,
   JoinServerInput,
   LeaveOnlineServerResponse,
@@ -43,6 +44,9 @@ import type {
   PasswordResetRequestResponse,
   PasswordResetVerifyInput,
   PasswordResetVerifyResponse,
+  ProfilePostLikeResponse,
+  ProfilePostResponse,
+  ProfileSocialResponse,
   PublishDesktopUpdateInput,
   PublishDesktopUpdateResponse,
   RegisterInput,
@@ -53,6 +57,7 @@ import type {
   SendDirectMessageInput,
   ServerMessageResponse,
   ServerMessagesResponse,
+  ServerLikeSummaryResponse,
   StarBalanceResponse,
   StartDirectConversationInput,
   TimeoutServerMemberInput,
@@ -60,6 +65,7 @@ import type {
   TwoFactorSetupResponse,
   UpdateOnlineServerStateInput,
   UpdateProfileInput,
+  UserLikeSummaryResponse,
   VerifyEmailInput,
   VerifyEmailResponse
 } from "@tempest-light/types";
@@ -102,6 +108,13 @@ export interface TempestLightApiClient {
   acceptFriendship(id: string): Promise<FriendRequestActionResponse>;
   declineFriendship(id: string): Promise<FriendRequestActionResponse>;
   cancelFriendship(id: string): Promise<FriendRequestActionResponse>;
+  getProfileSocial(userId: string): Promise<ProfileSocialResponse>;
+  createProfilePost(input: CreateProfilePostInput): Promise<ProfilePostResponse>;
+  deleteProfilePost(postId: string): Promise<{ ok: true; postId: string }>;
+  likeProfile(userId: string): Promise<UserLikeSummaryResponse>;
+  unlikeProfile(userId: string): Promise<UserLikeSummaryResponse>;
+  likeProfilePost(postId: string): Promise<ProfilePostLikeResponse>;
+  unlikeProfilePost(postId: string): Promise<ProfilePostLikeResponse>;
   listServers(): Promise<OnlineServerBundle>;
   listDiscoverableServers(): Promise<OnlineDiscoverServersResponse>;
   getServer(serverId: string): Promise<OnlineServerResponse>;
@@ -121,6 +134,9 @@ export interface TempestLightApiClient {
   listServerMessages(serverId: string, channelName: string, after?: string): Promise<ServerMessagesResponse>;
   sendServerMessage(serverId: string, input: SendServerMessageInput): Promise<ServerMessageResponse>;
   deleteServerMessage(serverId: string, messageId: string): Promise<DeleteServerMessageResponse>;
+  getServerLikes(serverId: string): Promise<ServerLikeSummaryResponse>;
+  likeServer(serverId: string): Promise<ServerLikeSummaryResponse>;
+  unlikeServer(serverId: string): Promise<ServerLikeSummaryResponse>;
   addStarsToServer(serverId: string, input: AddServerStarsInput): Promise<AddServerStarsResponse>;
   listServerVoiceStates(serverId: string): Promise<OnlineVoiceStatesResponse>;
   updateServerVoiceState(serverId: string, input: OnlineVoiceStateInput): Promise<OnlineVoiceStateResponse>;
@@ -292,6 +308,32 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
       request<FriendRequestActionResponse>(`/friends/requests/${encodeURIComponent(id)}/cancel`, {
         method: "POST"
       }),
+    getProfileSocial: (userId) => request<ProfileSocialResponse>(`/profiles/${encodeURIComponent(userId)}/social`),
+    createProfilePost: (input) =>
+      request<ProfilePostResponse>("/profiles/me/posts", {
+        method: "POST",
+        body: JSON.stringify(input)
+      }),
+    deleteProfilePost: (postId) =>
+      request<{ ok: true; postId: string }>(`/profiles/posts/${encodeURIComponent(postId)}`, {
+        method: "DELETE"
+      }),
+    likeProfile: (userId) =>
+      request<UserLikeSummaryResponse>(`/profiles/${encodeURIComponent(userId)}/likes`, {
+        method: "POST"
+      }),
+    unlikeProfile: (userId) =>
+      request<UserLikeSummaryResponse>(`/profiles/${encodeURIComponent(userId)}/likes`, {
+        method: "DELETE"
+      }),
+    likeProfilePost: (postId) =>
+      request<ProfilePostLikeResponse>(`/profiles/posts/${encodeURIComponent(postId)}/likes`, {
+        method: "POST"
+      }),
+    unlikeProfilePost: (postId) =>
+      request<ProfilePostLikeResponse>(`/profiles/posts/${encodeURIComponent(postId)}/likes`, {
+        method: "DELETE"
+      }),
     listServers: () => request<OnlineServerBundle>("/servers"),
     listDiscoverableServers: () => request<OnlineDiscoverServersResponse>("/servers/discover"),
     getServer: (serverId) => request<OnlineServerResponse>(`/servers/${encodeURIComponent(serverId)}`),
@@ -369,6 +411,15 @@ export function createApiClient(baseUrl: string, getToken?: () => string | null)
       }),
     deleteServerMessage: (serverId, messageId) =>
       request<DeleteServerMessageResponse>(`/servers/${encodeURIComponent(serverId)}/messages/${encodeURIComponent(messageId)}`, {
+        method: "DELETE"
+      }),
+    getServerLikes: (serverId) => request<ServerLikeSummaryResponse>(`/servers/${encodeURIComponent(serverId)}/likes`),
+    likeServer: (serverId) =>
+      request<ServerLikeSummaryResponse>(`/servers/${encodeURIComponent(serverId)}/likes`, {
+        method: "POST"
+      }),
+    unlikeServer: (serverId) =>
+      request<ServerLikeSummaryResponse>(`/servers/${encodeURIComponent(serverId)}/likes`, {
         method: "DELETE"
       }),
     addStarsToServer: (serverId, input) =>

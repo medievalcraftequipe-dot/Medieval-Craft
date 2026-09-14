@@ -22,7 +22,8 @@ export class ServersService {
     members: { include: { user: true } },
     invites: { include: { createdBy: true }, orderBy: { createdAt: "desc" as const } },
     bans: { include: { user: true, moderator: true }, orderBy: { createdAt: "desc" as const } },
-    serverVoiceSessions: { include: { user: true } }
+    serverVoiceSessions: { include: { user: true } },
+    _count: { select: { likes: true } }
   } satisfies Prisma.ServerInclude;
 
   constructor(
@@ -44,33 +45,51 @@ export class ServersService {
     });
 
     const serverIds = memberships.map((membership) => membership.serverId);
-    const messages = serverIds.length
-      ? await this.prisma.serverChannelMessage.findMany({
-          where: { serverId: { in: serverIds } },
-          include: { author: true },
-          orderBy: { createdAt: "desc" },
-          take: 400
-        })
-      : [];
+    const [messages, serverLikes] = serverIds.length
+      ? await Promise.all([
+          this.prisma.serverChannelMessage.findMany({
+            where: { serverId: { in: serverIds } },
+            include: { author: true },
+            orderBy: { createdAt: "desc" },
+            take: 400
+          }),
+          this.prisma.serverLike.findMany({
+            where: { userId, serverId: { in: serverIds } },
+            select: { serverId: true }
+          })
+        ])
+      : [[], []];
+    const likedServerIds = new Set(serverLikes.map((like) => like.serverId));
 
     return {
-      servers: memberships.map((membership) => this.presentServerState(membership.server)),
+      servers: memberships.map((membership) => this.withServerLikedByViewer(this.presentServerState(membership.server), likedServerIds)),
       messages: messages.reverse().map((message) => this.presentServerMessage(message)),
       voiceStates: memberships.flatMap((membership) => membership.server.serverVoiceSessions.map((session) => this.presentVoiceState(session)))
     };
   }
 
-  async listDiscoverableServers() {
+  async listDiscoverableServers(userId: string) {
     const servers = await this.prisma.server.findMany({
       include: this.serverStateInclude,
       orderBy: { updatedAt: "desc" },
       take: 80
     });
+    const discoverableServers = servers
+      .map((server) => this.presentServerState(server))
+      .filter((server) => server.isDiscoverable === true);
+    const discoverableServerIds = discoverableServers
+      .map((server) => this.readOptionalString(server.id))
+      .filter((serverId): serverId is string => Boolean(serverId));
+    const serverLikes = discoverableServerIds.length
+      ? await this.prisma.serverLike.findMany({
+          where: { userId, serverId: { in: discoverableServerIds } },
+          select: { serverId: true }
+        })
+      : [];
+    const likedServerIds = new Set(serverLikes.map((like) => like.serverId));
 
     return {
-      servers: servers
-        .map((server) => this.presentServerState(server))
-        .filter((server) => server.isDiscoverable === true)
+      servers: discoverableServers.map((server) => this.withServerLikedByViewer(server, likedServerIds))
     };
   }
 
@@ -87,7 +106,17 @@ export class ServersService {
       throw new NotFoundException("Servidor nao encontrado.");
     }
 
-    return { server: this.presentServerState(server) };
+    const likedByMe = await this.prisma.serverLike.findUnique({
+      where: {
+        serverId_userId: {
+          serverId,
+          userId
+        }
+      },
+      select: { userId: true }
+    });
+
+    return { server: { ...this.presentServerState(server), likedByMe: Boolean(likedByMe) } };
   }
 
   async createServer(userId: string, rawState: ClientServerState) {
@@ -192,6 +221,7 @@ export class ServersService {
       this.prisma.moderationAction.deleteMany({ where: { serverId } }),
       this.prisma.auditLog.deleteMany({ where: { serverId } }),
       this.prisma.customEmoji.deleteMany({ where: { serverId } }),
+      this.prisma.serverLike.deleteMany({ where: { serverId } }),
       this.prisma.sticker.deleteMany({ where: { serverId } }),
       this.prisma.permissionOverride.deleteMany({ where: { serverId } }),
       this.prisma.reaction.deleteMany({ where: { messageId: { in: channelMessageIds } } }),
@@ -213,6 +243,42 @@ export class ServersService {
     ]);
 
     return { ok: true as const, serverId };
+  }
+
+  async getServerLikes(userId: string, serverId: string) {
+    await this.ensureServerVisibleForLike(userId, serverId);
+    return this.getServerLikeSummary(userId, serverId);
+  }
+
+  async likeServer(userId: string, serverId: string) {
+    await this.ensureServerVisibleForLike(userId, serverId);
+    await this.prisma.serverLike.upsert({
+      where: {
+        serverId_userId: {
+          serverId,
+          userId
+        }
+      },
+      update: {},
+      create: {
+        serverId,
+        userId
+      }
+    });
+
+    return this.getServerLikeSummary(userId, serverId);
+  }
+
+  async unlikeServer(userId: string, serverId: string) {
+    await this.ensureServerVisibleForLike(userId, serverId);
+    await this.prisma.serverLike.deleteMany({
+      where: {
+        serverId,
+        userId
+      }
+    });
+
+    return this.getServerLikeSummary(userId, serverId);
   }
 
   async addStarsToServer(userId: string, serverId: string, amountInput: number) {
@@ -902,6 +968,52 @@ export class ServersService {
     return server;
   }
 
+  private async ensureServerVisibleForLike(userId: string, serverId: string) {
+    const server = await this.prisma.server.findUnique({
+      where: { id: serverId },
+      select: {
+        id: true,
+        ownerId: true,
+        clientState: true,
+        members: {
+          where: { userId },
+          select: { id: true }
+        }
+      }
+    });
+
+    if (!server) {
+      throw new NotFoundException("Servidor nao encontrado.");
+    }
+
+    const state = this.isRecord(server.clientState) ? server.clientState : {};
+    if (server.ownerId !== userId && !server.members.length && state.isDiscoverable !== true) {
+      throw new ForbiddenException("Voce nao pode curtir um servidor privado que nao participa.");
+    }
+  }
+
+  private async getServerLikeSummary(userId: string, serverId: string) {
+    const [likeCount, likedByMe] = await Promise.all([
+      this.prisma.serverLike.count({ where: { serverId } }),
+      this.prisma.serverLike.findUnique({
+        where: {
+          serverId_userId: {
+            serverId,
+            userId
+          }
+        },
+        select: { userId: true }
+      })
+    ]);
+
+    return { serverId, likeCount, likedByMe: Boolean(likedByMe) };
+  }
+
+  private withServerLikedByViewer(state: ClientServerState, likedServerIds: Set<string>) {
+    const serverId = this.readOptionalString(state.id);
+    return { ...state, likedByMe: Boolean(serverId && likedServerIds.has(serverId)) };
+  }
+
   private async ensureMember(serverId: string, userId: string) {
     const member = await this.prisma.serverMember.findUnique({
       where: {
@@ -957,6 +1069,7 @@ export class ServersService {
     members: Array<{ userId: string; joinedAt: Date; timeoutUntil: Date | null; user: User }>;
     invites: Array<{ id: string; code: string; createdAt: Date; expiresAt: Date | null; maxUses: number | null; uses: number; active: boolean; createdBy: User }>;
     bans: Array<{ id: string; userId: string; reason: string | null; createdAt: Date; moderator: User; user: User }>;
+    _count?: { likes?: number };
   }): ClientServerState {
     const storedState = this.isRecord(server.clientState) ? { ...server.clientState } : {};
     const state: ClientServerState = {
@@ -973,6 +1086,8 @@ export class ServersService {
     state.invites = server.invites.map((invite) => this.presentInvite(invite));
     state.bans = server.bans.map((ban) => this.presentBan(ban));
     state.timeouts = this.presentTimeoutsFromMembers(server.members);
+    state.likeCount = typeof server._count?.likes === "number" ? server._count.likes : this.readNumber(storedState.likeCount, 0);
+    state.likedByMe = false;
 
     return state;
   }
@@ -1000,7 +1115,6 @@ export class ServersService {
         bannerUrl: membership.user.bannerUrl,
         bio: membership.user.bio,
         presence: membership.user.presence === "INVISIBLE" ? "OFFLINE" : membership.user.presence,
-        starBalance: membership.user.starBalance,
         accountCreatedAt: membership.user.createdAt.toISOString(),
         joinedAt: membership.joinedAt.toISOString(),
         roleIds: this.readStringArray(existing.roleIds, ["everyone"]),
@@ -1031,7 +1145,6 @@ export class ServersService {
       bannerUrl: user.bannerUrl,
       bio: user.bio,
       presence: user.presence,
-      starBalance: user.starBalance,
       accountCreatedAt: user.createdAt.toISOString(),
       joinedAt: existingIndex >= 0 ? this.readOptionalString(members[existingIndex].joinedAt) ?? joinedAt.toISOString() : joinedAt.toISOString(),
       roleIds,
@@ -1464,6 +1577,10 @@ export class ServersService {
 
   private readStringArray(value: unknown, fallback: string[] = []) {
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : fallback;
+  }
+
+  private readNumber(value: unknown, fallback = 0) {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
   }
 
   private readTempestBotAuthor(mentions: unknown) {
