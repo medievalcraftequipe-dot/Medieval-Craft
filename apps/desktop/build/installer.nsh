@@ -9,3 +9,10 @@
     Sleep 2000
   ${EndIf}
 !macroend
+
+!macro customInstall
+  ${If} ${Silent}
+    DetailPrint "Launching Tempest Light after silent update."
+    Exec '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --updated'
+  ${EndIf}
+!macroend
