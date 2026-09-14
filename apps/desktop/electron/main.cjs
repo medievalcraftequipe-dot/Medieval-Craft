@@ -538,6 +538,7 @@ function startSilentUpdateInstaller(installerPath, targetVersion) {
   }
 
   const updateScriptPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.cmd`);
+  const updateLauncherPath = path.join(os.tmpdir(), `tempest-light-update-${process.pid}-${Date.now()}.vbs`);
   const updateLogPath = getUpdateLogPath();
   const updateStatePath = getUpdateStatePath();
   const installDir = path.dirname(launcherPath);
@@ -571,6 +572,7 @@ function startSilentUpdateInstaller(installerPath, targetVersion) {
     `set "TEMPEST_UPDATE_STATE=${updateStatePath.replace(/%/g, "%%").replace(/"/g, "")}"`,
     `set "TEMPEST_TARGET_VERSION=${String(targetVersion).replace(/%/g, "%%").replace(/"/g, "")}"`,
     `set "TEMPEST_INSTALLER=${installerPath.replace(/%/g, "%%").replace(/"/g, "")}"`,
+    `set "TEMPEST_UPDATE_LAUNCHER=${updateLauncherPath.replace(/%/g, "%%").replace(/"/g, "")}"`,
     `set "TEMPEST_INSTALL_DIR=${installDir.replace(/%/g, "%%").replace(/"/g, "")}"`,
     `set "TEMPEST_LAUNCHER=${launcherPath.replace(/%/g, "%%").replace(/"/g, "")}"`,
     `set "TEMPEST_FALLBACK_LAUNCHER=${fallbackLauncherPath.replace(/%/g, "%%").replace(/"/g, "")}"`,
@@ -683,12 +685,25 @@ function startSilentUpdateInstaller(installerPath, targetVersion) {
     "exit /b 0",
     ":cleanup",
     `>> "%TEMPEST_UPDATE_LOG%" echo [%date% %time%] Update helper finished.`,
+    "if defined TEMPEST_UPDATE_LAUNCHER del \"%TEMPEST_UPDATE_LAUNCHER%\" >nul 2>nul",
     "del \"%~f0\" >nul 2>nul"
   ];
 
   fs.writeFileSync(updateScriptPath, lines.join(os.EOL), "utf8");
+  fs.writeFileSync(
+    updateLauncherPath,
+    [
+      "Set shell = CreateObject(\"WScript.Shell\")",
+      "Set args = WScript.Arguments",
+      "If args.Count > 0 Then",
+      "  shell.Run Chr(34) & args(0) & Chr(34), 0, False",
+      "End If"
+    ].join("\r\n"),
+    "utf8"
+  );
 
-  const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", updateScriptPath], {
+  const wscriptPath = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe");
+  const child = spawn(fs.existsSync(wscriptPath) ? wscriptPath : "wscript.exe", [updateLauncherPath, updateScriptPath], {
     detached: true,
     stdio: "ignore",
     windowsHide: true

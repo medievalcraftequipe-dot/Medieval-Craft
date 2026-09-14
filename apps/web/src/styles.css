@@ -4432,12 +4432,15 @@ img.profile-card-avatar {
 }
 
 .profile-role-manager {
+  display: grid;
+  gap: 8px;
   position: relative;
-  width: fit-content;
+  width: 100%;
 }
 
 .profile-role-add {
   display: grid;
+  justify-self: start;
   width: 30px;
   height: 30px;
   place-items: center;
@@ -4449,6 +4452,50 @@ img.profile-card-avatar {
 
 .profile-role-add:hover {
   background: color-mix(in srgb, var(--accent), transparent 80%);
+}
+
+.profile-assigned-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.profile-assigned-role {
+  --profile-role-color: #99aab5;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 26px;
+  border: 1px solid color-mix(in srgb, var(--profile-role-color), transparent 44%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--profile-role-color), transparent 88%);
+  color: var(--text);
+  padding: 0 8px;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.profile-assigned-role img {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.profile-assigned-role .role-color-dot {
+  width: 9px;
+  height: 9px;
+  background: var(--profile-role-color);
+}
+
+.profile-assigned-role span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .profile-role-menu {

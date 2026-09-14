@@ -12353,8 +12353,9 @@ function ProfileCardDialog({
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [postDraft, setPostDraft] = useState("");
   const [posting, setPosting] = useState(false);
-  const assignableRoles = serverRoles.filter((role) => !role.isDefault);
   const profileServerRoleIds = new Set(profile.serverRoleIds ?? []);
+  const assignableRoles = serverRoles.filter((role) => !role.isDefault);
+  const assignedProfileRoles = assignableRoles.filter((role) => profileServerRoleIds.has(role.id));
   const showRoleManager = canManageServerRoles && Boolean(profile.serverJoinedAt) && Boolean(onToggleServerRole) && assignableRoles.length > 0;
   const profilePosts = profile.profilePosts ?? [];
   const profileLikeCount = clampPublicCounter(profile.profileLikeCount);
@@ -12580,6 +12581,21 @@ function ProfileCardDialog({
               <button className="profile-role-add" type="button" title="Adicionar cargo" onClick={() => setRoleMenuOpen((current) => !current)}>
                 <Plus size={15} />
               </button>
+              {assignedProfileRoles.length ? (
+                <div className="profile-assigned-roles" aria-label="Cargos atribuidos">
+                  {assignedProfileRoles.map((role) => (
+                    <span
+                      className="profile-assigned-role"
+                      key={`profile-assigned-role-${role.id}`}
+                      style={{ "--profile-role-color": role.color || "#99aab5" } as CSSProperties}
+                      title={role.name}
+                    >
+                      {role.iconUrl ? <SafePreviewImage src={role.iconUrl} alt="" /> : <span className="role-color-dot" />}
+                      <span>{role.name}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               {roleMenuOpen ? (
                 <div className="profile-role-menu">
                   {assignableRoles.map((role) => {
